@@ -3,6 +3,8 @@
 // current page file, recognizes it with librmpp_hwr.so (Rust, loaded only on first use), adds a page after the
 // current one and types the text there.
 #include <dlfcn.h>
+#include <cmath>
+#include <memory>
 #include <functional>
 #include <thread>
 
@@ -17,6 +19,11 @@
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QPointer>
+#include <QtCore/QPointF>
+#include <QtCore/QRectF>
+#include <QtCore/QSet>
+#include <QtCore/QTextStream>
+#include <QtCore/QMetaMethod>
 #include <QtCore/QSettings>
 #include <QtCore/QTimer>
 #include <QtGui/QGuiApplication>
@@ -269,6 +276,8 @@ void setStatus(const QString &s, bool busy) {
     if (!s.isEmpty()) qWarning("[rmpp-hwr] %s", qPrintable(s));
 }
 
+#include "ink.h"
+
 // ---- typing the result on the new page ----
 void typeText(const QStringList &lines) {
     QObject *focus = QGuiApplication::focusObject();
@@ -392,6 +401,20 @@ ToolbarTool {
     label: hwr.busy ? "Converting…" : "Convert page"
     iconSource: "qrc:/ark/icons/hwc"
     onClicked: hwr.command = "page#" + Date.now()
+}
+)QML";
+
+// Convert to ink (prototype): the lasso selection, recognized, written below it as pen strokes.
+const char *kInkQml = R"QML(
+import QtQuick
+import xofm.libs.toolbar
+ToolbarTool {
+    objectName: "rmppHwrInkButton"
+    type: ToolbarTool.Type.FoldoutButton
+    shouldShow: toolbar.notePage
+    label: "Selection to ink"
+    iconSource: "qrc:/ark/icons/hwc"
+    onClicked: hwr.command = "ink#" + Date.now()
 }
 )QML";
 
@@ -677,8 +700,85 @@ void tryInject() {
     item->setParent(box);
     item->stackAfter(anchor);
     if (auto *done = qobject_cast<QQuickItem *>(createInline(eng, ctx, kDoneQml, "Done", box, init))) done->stackAfter(item);
+    if (auto *ink = qobject_cast<QQuickItem *>(createInline(eng, ctx, kInkQml, "Ink", box, init))) ink->stackAfter(item);
     createInline(eng, ctx, kHideQml, "HideNative", item, {{QStringLiteral("target"), QVariant::fromValue<QObject *>(anchor)}});
     qWarning("[rmpp-hwr] button added in %s", box->metaObject()->className());
+}
+
+// ---- developer probe: dump the meta-objects reachable from the open DocumentView ----
+// Trigger: echo probe > /home/root/.local/share/rmpp-hwr/cmd   (output: probe.txt next to it)
+void probeObject(QObject *o, int depth, QSet<QObject *> &seen, QSet<QByteArray> &classes, QTextStream &out,
+                 const QString &path) {
+    if (!o || depth > 7 || seen.contains(o)) return;
+    seen.insert(o);
+    const QMetaObject *mo = o->metaObject();
+    const QByteArray cls = mo->className();
+    out << QString(depth * 2, QLatin1Char(' ')) << path << " : " << cls << " '" << o->objectName() << "'\n";
+    if (!classes.contains(cls)) {
+        classes.insert(cls);
+        for (const QMetaObject *m = mo; m && qstrcmp(m->className(), "QQuickItem") && qstrcmp(m->className(), "QObject");
+             m = m->superClass()) {
+            out << "   [class " << m->className() << "]\n";
+            for (int i = m->propertyOffset(); i < m->propertyCount(); ++i) {
+                const QMetaProperty p = m->property(i);
+                out << "     prop " << p.typeName() << " " << p.name() << " = "
+                    << p.read(o).toString().left(80) << "\n";
+            }
+            for (int i = m->methodOffset(); i < m->methodCount(); ++i) {
+                const QMetaMethod mm = m->method(i);
+                static const char *kinds[] = {"method", "signal", "slot", "ctor"};
+                out << "     " << kinds[mm.methodType()] << " " << mm.typeName() << " " << mm.methodSignature() << "\n";
+            }
+        }
+    }
+    for (int i = 0; i < mo->propertyCount(); ++i) {
+        const QMetaProperty p = mo->property(i);
+        if (!(p.metaType().flags() & QMetaType::PointerToQObject)) continue;
+        if (!qstrcmp(p.name(), "parent")) continue;
+        probeObject(p.read(o).value<QObject *>(), depth + 1, seen, classes, out, QStringLiteral(".") + p.name());
+    }
+    for (QObject *c : o->children()) probeObject(c, depth + 1, seen, classes, out, QStringLiteral("/child"));
+    if (auto *it = qobject_cast<QQuickItem *>(o))
+        for (QQuickItem *c : it->childItems()) probeObject(c, depth + 1, seen, classes, out, QStringLiteral("/item"));
+}
+
+void probe() {
+    QFile f(QLatin1String(kLibDir) + QStringLiteral("/probe.txt"));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return;
+    QTextStream out(&f);
+    QSet<QObject *> seen;
+    QSet<QByteArray> classes;
+    QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
+    probeObject(dv, 0, seen, classes, out, QStringLiteral("DocumentView"));
+    out << "---- roots ----\n";
+    for (QWindow *w : QGuiApplication::allWindows())
+        if (auto *qw = qobject_cast<QQuickWindow *>(w)) probeObject(qw->contentItem(), 0, seen, classes, out, QStringLiteral("window"));
+}
+
+void devCommand(const QString &cmd);
+
+void watchCmdFile() {
+    const QString p = QLatin1String(kLibDir) + QStringLiteral("/cmd");
+    QFile f(p);
+    if (!f.exists() || !f.open(QIODevice::ReadOnly)) return;
+    const QString cmd = QString::fromUtf8(f.readAll()).trimmed();
+    f.close();
+    QFile::remove(p);
+    qWarning("[rmpp-hwr] dev command: %s", qPrintable(cmd.left(60)));
+    devCommand(cmd);
+}
+
+void devCommand(const QString &cmd) {
+    if (cmd == QLatin1String("probe")) probe();
+    else if (cmd == QLatin1String("ink")) convertSelectionToInk(false);
+    else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
+    else if (cmd.startsWith(QLatin1String("load "))) {   // load <path.so> [arg]: run an experiment without restarting
+        const QString so = cmd.section(QLatin1Char(' '), 1, 1);
+        void *h = dlopen(so.toUtf8().constData(), RTLD_NOW | RTLD_LOCAL);
+        auto fn = h ? reinterpret_cast<void (*)(const char *)>(dlsym(h, "rmpp_exp")) : nullptr;
+        if (!fn) { qWarning("[rmpp-hwr] load failed: %s", h ? "no rmpp_exp" : dlerror()); return; }
+        fn(cmd.section(QLatin1Char(' '), 2).toUtf8().constData());
+    }
 }
 
 void hwrInit() {
@@ -693,6 +793,8 @@ void hwrInit() {
         if (key != QLatin1String("command")) return;
         const QString cmd = v.toString().section(QLatin1Char('#'), 0, 0);
         if (cmd == QLatin1String("page")) convertCurrentPage();
+        else if (cmd == QLatin1String("ink")) convertSelectionToInk(false);
+        else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
         else if (cmd == QLatin1String("refresh")) refreshInfo();
         else if (cmd == QLatin1String("delall")) deleteConversions(QString());
         else if (cmd.startsWith(QLatin1String("del:"))) deleteConversions(cmd.mid(4));
@@ -708,7 +810,7 @@ void hwrInit() {
         }
     });
     auto *t = new QTimer(app);
-    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); updateCurrentPage(); });
+    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); updateCurrentPage(); watchCmdFile(); });
     t->start(1500);
     qWarning("[rmpp-hwr] loaded");
 }
