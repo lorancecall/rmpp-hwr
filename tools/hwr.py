@@ -107,7 +107,7 @@ def cmd_pull(a):
     for j in sorted(DATA.glob("practice-*.json")):
         if not (COLLECTED / "practice" / j.name).exists():
             sidecars += ["--sidecar", str(j)]
-    run([py(), "-I", str(COLLECT), "pull", "--host", need("RMPP_IP"), "--key", str(Path(cfg("RMPP_KEY", "~/.ssh/id_ed25519_rmpp")).expanduser()),
+    run([py(), "-I", str(COLLECT), "pull", "--host", cfg("RMPP_IP") or TABLET, "--key", str(Path(cfg("RMPP_KEY", "~/.ssh/id_ed25519_rmpp")).expanduser()),
          "--out", str(COLLECTED), *sidecars, *(["--keep"] if a.keep else [])], env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     tsv = COLLECTED / "dataset.tsv"
     n = sum(1 for _ in tsv.open(encoding="utf-8")) if tsv.exists() else 0

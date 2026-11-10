@@ -510,13 +510,22 @@ def pull_practice2(d, doc, side, rms, digest):
             render(xy, r["strokes"]).save(f)
             rows.append(f"{f.relative_to(d.parent.parent).as_posix()}\t{it['text'].strip()}")
         if it["kind"] == "row":
-            for ci, (cl, cs) in enumerate(zip(it["cells"], r["cells"])):
-                if cl["char"] == " " or not cs or any(p.startswith(f"cell {ci} ") for p in probs):
+            pairs = [(ci, cl["char"], cs) for ci, (cl, cs) in enumerate(zip(it["cells"], r["cells"]))
+                     if cl["char"] != " " and cs]
+            if any("empty" in p or "blank" in p or "after the last" in p for p in probs):
+                # The writing does not follow the cells (e.g. the blank space cells were written in too). If the
+                # filled cells, in order, are exactly the non-space characters, pair them in order; otherwise the
+                # row is unsafe for per-character labels and is skipped entirely.
+                filled = [(ci, cs) for ci, cs in enumerate(r["cells"]) if cs]
+                text = [c for c in it["text"] if c != " "]
+                pairs = [(ci, ch, cs) for (ci, cs), ch in zip(filled, text)] if len(filled) == len(text) else []
+            for ci, ch, cs in pairs:
+                if any(p.startswith(f"cell {ci} ") and "crosses" in p for p in probs):
                     continue
                 f = d / "cells" / f"{it['id']:03d}_{ci:02d}.png"
                 f.parent.mkdir(exist_ok=True)
                 render(xy, cs).save(f)
-                chars.append(f"{f.relative_to(d.parent.parent).as_posix()}\t{cl['char']}")
+                chars.append(f"{f.relative_to(d.parent.parent).as_posix()}\t{ch}")
     (d / "pairs.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
     (d / "chars.tsv").write_text("\n".join(chars) + "\n", encoding="utf-8")
     (d / "qc.json").write_text(json.dumps({"stray_strokes": stray, "items": qc}, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -573,7 +582,7 @@ def cmd_pull(a):
     pull_practice(tab, out, load_sidecars(out, a.sidecar), a.y_offset)
     rows = []
     for p in sorted((out / "samples").glob("*/pairs.tsv")):
-        rows += [l for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+        rows += [strip_bullet(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
     (out / "dataset.tsv").write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
     print(f"dataset.tsv: {len(rows)} labelled line images")
     chars = []
@@ -642,13 +651,24 @@ def wrap(line):
     return out + ([cur] if cur else [])
 
 
+BULLET = re.compile(r"^(?:[-*•·]|\d+[.)])\s+")
+
+
+def strip_bullet(row):
+    """Practice texts can start with a list marker ("- ", "1. "); people do not copy it, so it is not part of the label."""
+    if "\t" not in row:
+        return row
+    path, text = row.split("\t", 1)
+    return f"{path}\t{BULLET.sub('', text)}" if path.split("/")[1].startswith("practice_") else row
+
+
 def passages(path):
     """Blank-line separated passages; one line = one band. A file without blank lines is one line per passage."""
     raw = path.read_text(encoding="utf-8").replace("\r", "")
     blocks = [b for b in re.split(r"\n\s*\n", raw) if b.strip()]
     if len(blocks) == 1:
         blocks = blocks[0].split("\n")
-    return [[w for l in b.split("\n") if l.strip() for w in wrap(l.strip())] for b in blocks]
+    return [[w for l in b.split("\n") if l.strip() for w in wrap(BULLET.sub("", l.strip()))] for b in blocks]
 
 
 def pick_from_texts(files, count, avoid, seed):

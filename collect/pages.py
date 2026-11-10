@@ -152,7 +152,7 @@ def layout(kinds, seed):
 
 
 HEADERS = {
-    "grid": "칸마다 한 글자씩 쓰세요. 빈 칸은 띄어쓰기입니다. 평소 글씨체로.",
+    "grid": "흰 칸에 한 글자씩 쓰세요. 회색 칸은 띄어쓰기라 비워 둡니다. 평소 글씨체로.",
     "digits": "칸마다 한 글자(숫자, 기호)씩 쓰세요. 비슷한 글자는 서로 다르게 보이도록.",
     "english": "영어는 네 줄에 맞춰 쓰세요: 소문자 몸통은 가운데 칸, g y p 꼬리는 아래 칸.",
     "free": "줄 위에 자연스럽게 쓰세요. '빠르게' 표시가 있는 줄은 평소 메모하듯 빨리.",
@@ -178,6 +178,11 @@ def draw_pdf(pages, out, font_name, title="rmpp-practice"):
             if it["kind"] == "row":
                 for cell in it["cells"]:
                     a, b, d, e = cell["box"]
+                    if cell["char"] == " ":   # a space: shaded, no guide, so it is clearly left empty
+                        c.setFillGray(0.9); c.setStrokeGray(0.9); c.setLineWidth(0.5); c.setDash()
+                        c.rect(a * PT, Y(e), (d - a) * PT, (e - b) * PT, stroke=1, fill=1)
+                        c.setFillGray(0.0)
+                        continue
                     c.setStrokeGray(0.72); c.setLineWidth(1.2); c.setDash()
                     c.rect(a * PT, Y(e), (d - a) * PT, (e - b) * PT)
                     c.setStrokeGray(0.86); c.setLineWidth(0.8); c.setDash(3, 4)
