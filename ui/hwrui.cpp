@@ -404,19 +404,6 @@ ToolbarTool {
 }
 )QML";
 
-// Convert to ink (prototype): the lasso selection, recognized, written below it as pen strokes.
-const char *kInkQml = R"QML(
-import QtQuick
-import xofm.libs.toolbar
-ToolbarTool {
-    objectName: "rmppHwrInkButton"
-    type: ToolbarTool.Type.FoldoutButton
-    shouldShow: toolbar.notePage
-    label: "Selection to ink"
-    iconSource: "qrc:/ark/icons/hwc"
-    onClicked: hwr.command = "ink#" + Date.now()
-}
-)QML";
 
 // Hides the built-in tool while the setting is on; Binding restores xochitl's own binding when it is turned off.
 const char *kHideQml = R"QML(
@@ -700,7 +687,6 @@ void tryInject() {
     item->setParent(box);
     item->stackAfter(anchor);
     if (auto *done = qobject_cast<QQuickItem *>(createInline(eng, ctx, kDoneQml, "Done", box, init))) done->stackAfter(item);
-    if (auto *ink = qobject_cast<QQuickItem *>(createInline(eng, ctx, kInkQml, "Ink", box, init))) ink->stackAfter(item);
     createInline(eng, ctx, kHideQml, "HideNative", item, {{QStringLiteral("target"), QVariant::fromValue<QObject *>(anchor)}});
     qWarning("[rmpp-hwr] button added in %s", box->metaObject()->className());
 }
@@ -781,6 +767,65 @@ void devCommand(const QString &cmd) {
     }
 }
 
+// Lasso menu (cut / copy / convert / delete): the convert button converts the selection to ink instead of text.
+// A MouseArea on top of xochitl's button takes the tap; the icon becomes a pen tip.
+const char *kInkMenuQml = R"QML(
+import QtQuick
+MouseArea {
+    anchors.fill: parent
+    z: 1000
+    onClicked: hwr.command = "ink#" + Date.now()
+}
+)QML";
+
+void tryInjectInkMenu() {
+    QQuickItem *menu = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionHandlerMenu"); });
+    if (!menu) return;
+    QQuickItem *btn = findItem(menu, [](QQuickItem *i) {
+        return i->property("iconSource").toString() == QLatin1String("qrc:/ark/icons/hwc") && qstrcmp(i->metaObject()->className(), "Button") == 0;
+    });
+    if (!btn || btn->property("_rmppHwrInk").toBool()) return;
+    QQmlEngine *eng = qmlEngine(btn);
+    QQmlContext *base = qmlContext(btn);
+    if (!eng || !base) return;
+    btn->setProperty("_rmppHwrInk", true);
+    auto *ctx = new QQmlContext(base, btn);
+    ctx->setContextProperty(QStringLiteral("hwr"), g_state);
+    QObject *area = createInline(eng, ctx, kInkMenuQml, "InkMenu", btn);
+    btn->setProperty("iconSource", QStringLiteral("qrc:/ark/icons/ballpoint_tip"));
+    qWarning("[rmpp-hwr] lasso menu: convert button -> ink %s", area ? "ok" : "FAILED");
+}
+
+// Calls fn on a signal of an object we have no headers for (like QSignalSpy: overrides qt_metacall).
+class SignalHook : public QObject {
+public:
+    std::function<void()> fn;
+    int qt_metacall(QMetaObject::Call c, int id, void **a) override {
+        id = QObject::qt_metacall(c, id, a);
+        if (id < 0 || c != QMetaObject::InvokeMetaMethod) return id;
+        if (id == 0 && fn) fn();
+        return -1;
+    }
+};
+
+// The lasso menu is created when the first selection is made: watch the open page's selection count and patch the
+// menu right away (and shortly after, once QML has built it), so the first selection already shows the ink button.
+void watchSelection() {
+    QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
+    QObject *sc = dv ? dv->property("sceneController").value<QObject *>() : nullptr;
+    if (!sc || sc->property("_rmppHwrWatch").toBool()) return;
+    const int sig = sc->metaObject()->indexOfSignal("selectionItemCountChanged()");
+    if (sig < 0) return;
+    sc->setProperty("_rmppHwrWatch", true);
+    auto *hook = new SignalHook;
+    hook->setParent(sc);
+    hook->fn = [] {
+        tryInjectInkMenu();
+        for (int ms : {0, 50, 150, 400}) QTimer::singleShot(ms, qApp, [] { tryInjectInkMenu(); });
+    };
+    QMetaObject::connect(sc, sig, hook, QObject::staticMetaObject.methodCount(), Qt::DirectConnection, nullptr);
+}
+
 void hwrInit() {
     auto *app = QCoreApplication::instance();
     g_state = new QQmlPropertyMap(app);
@@ -810,7 +855,7 @@ void hwrInit() {
         }
     });
     auto *t = new QTimer(app);
-    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); updateCurrentPage(); watchCmdFile(); });
+    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); updateCurrentPage(); watchCmdFile(); });
     t->start(1500);
     qWarning("[rmpp-hwr] loaded");
 }
