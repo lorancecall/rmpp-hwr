@@ -177,6 +177,28 @@ QList<QList<QPointF>> placeLines(const QStringList &lines, const QRectF &sel, bo
     return all;
 }
 
+// Select strokes with a rectangular lasso around them (SceneController::selectWithLine(Line), what the lasso tool
+// calls). Selecting the new ink lets the user move it at once and also makes xochitl redraw that area.
+void selectInk(QObject *sc, const QList<QList<QPointF>> &strokes) {
+    const int sel = sc->metaObject()->indexOfMethod("selectWithLine(Line)");
+    const QMetaType type = sel >= 0 ? sc->metaObject()->method(sel).parameterMetaType(0) : QMetaType();
+    if (sel < 0 || type.sizeOf() != 88 || strokes.isEmpty()) return;
+    QRectF r;
+    for (const auto &s : strokes)
+        for (const QPointF &p : s) r = r.isNull() ? QRectF(p, QSizeF(0.1, 0.1)) : r.united(QRectF(p, QSizeF(0.1, 0.1)));
+    r.adjust(-15, -15, 15, 15);
+    const QList<QPointF> loop{r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft(), r.topLeft()};
+    void *line = type.create();
+    auto *b = static_cast<char *>(line);
+    *reinterpret_cast<int *>(b + 0x00) = 11;   // selection tool
+    *reinterpret_cast<uint *>(b + 0x08) = 0xff000000u;
+    *reinterpret_cast<QList<InkPt> *>(b + 0x10) = inkPoints(loop, 12);
+    *reinterpret_cast<double *>(b + 0x28) = 2.0;
+    void *argv[] = {nullptr, line};
+    sc->qt_metacall(QMetaObject::InvokeMetaMethod, sel, argv);
+    type.destroy(line);
+}
+
 void convertSelectionToInk(bool replace) {
     if (g_state->value(QStringLiteral("busy")).toBool()) return;
     QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
@@ -214,8 +236,11 @@ void convertSelectionToInk(bool replace) {
             QTimer::singleShot(400, scp, [scp, php, dvp, strokes] {
                 if (!scp || !php) { setStatus(QStringLiteral("page closed"), false); return; }
                 const int added = addInkStrokes(scp, php, strokes);
-                // lines added this way are not drawn until the next redraw; this is what the pen path calls
-                if (dvp) QMetaObject::invokeMethod(dvp, "updateAfterStroke");
+                if (added > 0) selectInk(scp, strokes);
+                // lines added this way are not drawn until the next redraw (updateAfterStroke is what the pen path
+                // calls); repeat once the lasso menu has closed, which repaints the old screen content
+                for (int ms : {0, 300, 1000})
+                    QTimer::singleShot(ms, qApp, [dvp] { if (dvp) QMetaObject::invokeMethod(dvp, "updateAfterStroke"); });
                 setStatus(added < 0 ? QStringLiteral("this xochitl version is not supported") : QString(), false);
             });
         }, Qt::QueuedConnection);
