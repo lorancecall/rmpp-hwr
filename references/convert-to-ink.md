@@ -10,8 +10,8 @@ lasso selection.
 
 Works on the tablet: lasso-select handwriting -> the lasso menu's convert button (now a pen-tip icon) -> the selection
 is recognized (`rmpp_hwr_region`) and the text is written below it as ballpoint strokes, one line per recognized line,
-at the size of the handwriting. The new ink is ordinary page content: drawn at once, saved in the page `.rm` as normal
-lines (tool 15), lasso-movable. The original strokes are kept (nothing is deleted unless `ink:replace` is used).
+at the size of the handwriting, and is left selected (rectangular lasso via `selectWithLine(Line)`) so it can be moved
+at once. The new ink is ordinary page content: saved in the page `.rm` as normal lines (tool 15). The original strokes are kept (nothing is deleted unless `ink:replace` is used).
 
 Verified: strokes added live via `addDrawingLine`; saved to the `.rm`; selection bounds; lasso menu takeover on the
 first selection; immediate redraw. Not yet verified: undo of the added ink (each stroke should be its own undo step:
@@ -26,7 +26,8 @@ untested), `ink:replace` (deleteSelectedItems), pages with several layers, zoome
 | `DocumentView.sceneController` (`SceneController`) `addDrawingLine(Line)` | adds one finished pen stroke to the open page. **Ignored while a selection is active**: deselect (`clearSelectedItems()`) or delete (`deleteSelectedItems(int layer)`) first, then add after ~400 ms |
 | `SceneController.cloneSelectedItems(int layer, double)` + `getItemBoundingRect(QList<shared_ptr<SceneItem>>)` | bounds of the selection in page units. The double must be 1.0 (0 gives an empty rect). The item list is passed opaquely as `QList<std::shared_ptr<void>>` |
 | `SceneController.selectionItemCountChanged()` | used to patch the lasso menu as soon as it is created |
-| `DocumentView.updateAfterStroke()` | redraw after adding lines; without it the new ink only appears after the next interaction |
+| `DocumentView.updateAfterStroke()` | redraw after adding lines (called at 0, 300 and 1000 ms: the closing lasso menu repaints the old content) |
+| `SceneController.selectWithLine(Line)` | select with a lasso polygon (Line with tool 11); used to leave the new ink selected |
 | `DocumentView.penHandler` (`PenInputLineHandler`) `lineTool`, `lineColor`, `lineArgbCode`, `lineThickness` | current pen. With the lasso active `lineTool` is 11 (selection tool), so non-pen tools fall back to Ballpointv2 (15) |
 | lasso menu `SelectionContextualMenu 'selectionHandlerMenu'` > `ButtonRow` > `Button` x4 (`iconSource` cut / copy / hwc / trashcan) | recreated for every selection; we put a `MouseArea` over the `hwc` button and set its icon to `ballpoint_tip` |
 | `SceneSelectionHandler` (`showConvertToText`, `sceneSelectionRect`) | alternative source of the selection rect; not used yet |
