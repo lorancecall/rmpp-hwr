@@ -464,21 +464,33 @@ def pull_practice(tab, out, sidecars, y_off):
             pull_practice2(d, doc, side, rms, digest)
             continue
         rows, lost = [], 0
+        full_pages, items, assign = {}, [], []
         for pi, rm in enumerate(rms):
             if not rm:
                 continue
-            strokes = read_strokes(rm)
+            full = read_strokes_full(rm)
+            strokes = [s["points"][:, :2] for s in full]
+            full_pages[str(pi)] = [{"tool": s["tool"], "points": np.round(s["points"], 2).tolist()} for s in full]
             cy = [(bbox(s)[1] + bbox(s)[3]) / 2 + y_off for s in strokes]
             used = set()
             for pr in (p for p in side["prompts"] if p["page"] == pi):
                 bd = pr["band"]
                 idx = [i for i, y in enumerate(cy) if bd["y0"] - BAND_UP <= y <= bd["y1"] + BAND_DOWN]
                 used.update(idx)
+                text = BULLET.sub("", pr["text"])
+                items.append({"id": pr["id"], "page": pi, "kind": "line", "layout": "lines", "size": "M", "text": text,
+                              "box": [bd["x0"], bd["y0"], bd["x1"], bd["y1"]], "guides": []})
+                assign.append({"id": pr["id"], "page": pi, "strokes": idx})
                 if idx:
                     f = d / f"{pr['id']:03d}.png"
                     render(strokes, idx).save(f)
                     rows.append(f"{f.relative_to(out).as_posix()}\t{pr['text']}")
             lost += len(strokes) - len(used)
+        # raw pen data in the same layout as practice v2 (one "line" item per band), for the open dataset
+        tmpl = {"format": "rmpp-hwr/practice@1", "page_px": side.get("page_px", [1620, 2160]), "dpi": side.get("dpi", 229),
+                "seed": side.get("seed", 0), "page_kinds": ["lines"] * len(rms), "items": items}
+        (d / "strokes.json").write_text(json.dumps({"format": "rmpp-hwr/strokes@1", "template": tmpl, "pages": full_pages,
+                                                    "assign": assign}, ensure_ascii=False), encoding="utf-8")
         (d / "pairs.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
         (d / "meta.json").write_text(json.dumps({"kind": "practice", "doc": doc, "sha1": digest,
                                                  "bands": len(rows), "unassigned_strokes": lost}), encoding="utf-8")

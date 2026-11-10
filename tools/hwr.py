@@ -434,9 +434,13 @@ def anonymize(strokes_json, writer):
     t = src["template"]
     tmpl = {k: t[k] for k in ("format", "page_px", "dpi", "seed", "page_kinds")}
     out = []
+    # same patterns as rmpp-hwr-db/scripts/validate.py: practice prompts that merely look like contact data
+    # (random phone numbers, e-mail-like words) are left out rather than rejected by the dataset CI
+    private = [re.compile(p) for p in (r"[\w.+-]+@[\w-]+\.[\w.]+", r"https?://", r"www\.",
+                                       r"\b01[016789]-?\d{3,4}-?\d{4}\b", r"\b\d{6}-?[1-4]\d{6}\b")]
     for p in sorted(src["pages"], key=int):
         pi = int(p)
-        items = [i for i in t["items"] if i["page"] == pi]
+        items = [i for i in t["items"] if i["page"] == pi and not any(x.search(i["text"]) for x in private)]
         ids = {i["id"] for i in items}
         assign = [a for a in src["assign"] if a["id"] in ids]
         out.append((session, pi, {
@@ -459,8 +463,13 @@ def cmd_contribute(a):
     files = sorted(COLLECTED.glob("samples/practice_*/strokes.json"))
     if not files:
         sys.exit("no practice v2 pages collected yet: `hwr practice --v2`, write them, then `hwr pull`")
-    shared = set(w.get("shared", []))
-    todo = [f for f in files if f.parent.name not in shared] if not a.all else files
+    import hashlib
+    shared = w.get("shared", {})
+    if isinstance(shared, list):                          # older writer.json: names only
+        shared = {k: "" for k in shared}
+    digest = {f.parent.name: hashlib.sha256(f.read_bytes()).hexdigest()[:16] for f in files}
+    # new notebooks, and notebooks written further since the last contribution (their pages are replaced)
+    todo = files if a.all else [f for f in files if shared.get(f.parent.name) != digest[f.parent.name]]
     if not todo:
         print("everything collected is already shared"); return
     clone = DATA / "rmpp-hwr-db"
@@ -476,7 +485,7 @@ def cmd_contribute(a):
     meta = {"writer": wid, "consent_issue": w["consent_issue"], "license": "CC-BY-4.0"}
     for k in ("handedness", "age_band"):
         if w.get(k): meta[k] = w[k]
-    (wdir / "writer.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
+    (wdir / "writer.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8", newline="\n")
     n = 0
     for f in todo:
         q = json.loads((f.parent / "qc.json").read_text(encoding="utf-8")) if (f.parent / "qc.json").exists() else {}
@@ -484,7 +493,7 @@ def cmd_contribute(a):
             rec["qc"] = [x for x in q.get("items", []) if x["page"] == pi]
             dst = wdir / session / f"page-{pi:02d}.json"
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_text(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+            dst.write_text(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8", newline="\n")
             n += 1
     git("add", "writers")
     run(["git", "-C", str(clone), "-c", "user.name=rmpp-hwr contributor",
@@ -495,12 +504,13 @@ def cmd_contribute(a):
     me = subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True, check=True).stdout.strip()
     if me.lower() != repo.split("/")[0].lower():          # contributors work from a fork
         run(["gh", "repo", "fork", repo, "--clone=false", "--remote=false"], cwd=clone)
-    run(["git", "-C", str(clone), "push", "-q", f"https://github.com/{me}/{repo.split('/')[1]}.git", f"HEAD:{branch}"])
+    run(["git", "-C", str(clone), "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+         "push", "-q", f"https://github.com/{me}/{repo.split('/')[1]}.git", f"HEAD:{branch}"])
     run(["gh", "pr", "create", "-R", repo, "--head", f"{me}:{branch}", "--base", "main",
          "--title", f"Handwriting pages from writer {wid[:8]}",
          "--body", f"Consent: #{w['consent_issue']}\n\n{n} practice page(s), format `{DB_FORMAT}`. "
                    "Created with `hwr contribute`; no personal data."])
-    w["shared"] = sorted(shared | {f.parent.name for f in todo})
+    w["shared"] = {**shared, **{f.parent.name: digest[f.parent.name] for f in todo}}
     (DATA / "writer.json").write_text(json.dumps(w, indent=1), encoding="utf-8")
 
 
