@@ -467,12 +467,19 @@ def anonymize(strokes_json, writer):
                  and not any(x.search(i["text"]) for x in private)]
         ids = {i["id"] for i in items}
         assign = [a for a in src["assign"] if a["id"] in ids]
+        # Only strokes that belong to a shared item: no stray writing outside the bands/cells (notes, tests,
+        # ink inserted by tools), and nothing from left-out items. Indices are renumbered.
+        used = sorted({i for a in assign for i in a["strokes"]})
+        new = {old: k for k, old in enumerate(used)}
+        assign = [{**a, "strokes": [new[i] for i in a["strokes"]],
+                   **({"cells": [[new[i] for i in c] for c in a["cells"]]} if "cells" in a else {})} for a in assign]
+        page_strokes = src["pages"][p]
         out.append((session, pi, {
             "format": DB_FORMAT, "writer": writer, "session": session, "page": pi,
             "template": {**tmpl, "page_kind": t["page_kinds"][pi]},
             "items": items, "assign": assign,
-            "strokes": [{"tool": s["tool"], "points": [[round(v, 1) for v in pt] for pt in s["points"]]}
-                        for s in src["pages"][p]],
+            "strokes": [{"tool": page_strokes[i]["tool"],
+                         "points": [[round(v, 1) for v in pt] for pt in page_strokes[i]["points"]]} for i in used],
         }))
     return out
 
