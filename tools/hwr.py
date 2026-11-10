@@ -283,6 +283,15 @@ def cmd_job(a):
     b.submit(a.name or Path(a.job).stem, [(a.job, a.args, a.res)])
 
 
+def excluded():
+    """hwr-data/collected/exclude.txt: sample paths (as in dataset.tsv) never used for training or sharing,
+    for lines whose writing does not match the label (e.g. other writing in the band). '#' = comment."""
+    f = COLLECTED / "exclude.txt"
+    if not f.exists():
+        return set()
+    return {l.split("#")[0].strip() for l in f.read_text(encoding="utf-8").splitlines() if l.split("#")[0].strip()}
+
+
 def cmd_upload(a):
     if not (COLLECTED / "dataset.tsv").exists():
         sys.exit("nothing collected yet: run `hwr pull` first")
@@ -293,7 +302,15 @@ def cmd_upload(a):
         sys.exit("no eval lines found: set HWR_EVAL_DOC in .env (the practice notebook kept for evaluation)")
     (COLLECTED / "eval.txt").write_text("\n".join(held) + "\n", encoding="utf-8")
     b = Backend()
-    b.put(COLLECTED, ["dataset.tsv", "eval.txt", "samples"], "data/personal")
+    skip = excluded()
+    with tempfile.TemporaryDirectory() as t:   # dataset.tsv without the lines listed in exclude.txt
+        keep = [l for l in (COLLECTED / "dataset.tsv").read_text(encoding="utf-8").splitlines()
+                if "\t" in l and l.split("\t")[0] not in skip]
+        (Path(t) / "dataset.tsv").write_text("\n".join(keep) + "\n", encoding="utf-8", newline="\n")
+        b.put(Path(t), ["dataset.tsv"], "data/personal")
+    if skip:
+        print(f"left out {len(skip)} line(s) listed in {COLLECTED / 'exclude.txt'}")
+    b.put(COLLECTED, ["eval.txt", "samples"], "data/personal")
     print(b.sh("wc -l < data/personal/dataset.tsv", capture=True).strip(), "lines in data/personal")
 
 
@@ -389,12 +406,17 @@ def cmd_qc(a):
         info.append(dict(path=p, text=t, hyp=hy, conf=conf, cer=lev(t, hy) / max(len(t), 1), chars=len(t),
                          w48=w * 48 / h, ppc=(w * 48 / h) / max(n, 1)))
     med = sorted(i["ppc"] for i in info)[len(info) // 2]
+    skip = excluded()
+    grid_dirs = {f.parent.name for f in COLLECTED.glob("samples/practice_*/strokes.json")
+                 if '"rmpp-hwr/practice@2"' in f.read_text(encoding="utf-8")[:4000]}
     for i in info:
         f = []
         if i["chars"] > 40: f.append("too-long(>40 chars: dropped by training)")
         if i["cer"] > a.cer: f.append(f"base-CER {i['cer']:.2f} (check label)")
         if i["ppc"] < med * 0.55: f.append("narrow (missing writing?)")
-        if i["ppc"] > med * 1.8: f.append("wide (extra writing?)")
+        if i["ppc"] > med * 1.8 and i["path"].split("/")[1] not in grid_dirs:   # v2 cells space letters out
+            f.append("wide (extra writing?)")
+        if i["path"] in skip: f.append("excluded (exclude.txt)")
         if i["w48"] > 1920: f.append("wider than 1920 px at height 48")
         i["flags"] = "; ".join(f)
     out = COLLECTED / "qc.tsv"
@@ -440,7 +462,9 @@ def anonymize(strokes_json, writer):
                                        r"\b01[016789]-?\d{3,4}-?\d{4}\b", r"\b\d{6}-?[1-4]\d{6}\b")]
     for p in sorted(src["pages"], key=int):
         pi = int(p)
-        items = [i for i in t["items"] if i["page"] == pi and not any(x.search(i["text"]) for x in private)]
+        skip = {int(Path(p).stem) for p in excluded() if p.startswith(f"samples/{doc}/") and Path(p).stem.isdigit()}
+        items = [i for i in t["items"] if i["page"] == pi and i["id"] not in skip
+                 and not any(x.search(i["text"]) for x in private)]
         ids = {i["id"] for i in items}
         assign = [a for a in src["assign"] if a["id"] in ids]
         out.append((session, pi, {

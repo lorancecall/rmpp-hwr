@@ -477,7 +477,7 @@ def pull_practice(tab, out, sidecars, y_off):
                 bd = pr["band"]
                 idx = [i for i, y in enumerate(cy) if bd["y0"] - BAND_UP <= y <= bd["y1"] + BAND_DOWN]
                 used.update(idx)
-                text = BULLET.sub("", pr["text"])
+                text = pr["text"]   # label = the printed prompt; new notebooks no longer print list markers
                 items.append({"id": pr["id"], "page": pi, "kind": "line", "layout": "lines", "size": "M", "text": text,
                               "box": [bd["x0"], bd["y0"], bd["x1"], bd["y1"]], "guides": []})
                 assign.append({"id": pr["id"], "page": pi, "strokes": idx})
@@ -594,7 +594,7 @@ def cmd_pull(a):
     pull_practice(tab, out, load_sidecars(out, a.sidecar), a.y_offset)
     rows = []
     for p in sorted((out / "samples").glob("*/pairs.tsv")):
-        rows += [strip_bullet(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+        rows += [l for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
     (out / "dataset.tsv").write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
     print(f"dataset.tsv: {len(rows)} labelled line images")
     chars = []
