@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """hwr: one command for the personal handwriting model loop.
 
+  hwr install [--model DIR]  install on the tablet (UI add-on, recognizer, model); again after OS updates
+  hwr uninstall [--purge]  remove from the tablet
   hwr pull [--keep]        fetch practice notebooks + corrected conversions -> hwr-data/collected;
                            moved conversions are removed from the tablet unless --keep
   hwr practice [N] [--text story|talk|notes|FILE.txt]... [--list]
@@ -526,6 +528,81 @@ def cmd_models(a):
     print(ssh(TABLET, f"echo tablet: $(head -1 {DEV_DIR}/model.txt 2>/dev/null || echo base model)", capture=True).strip())
 
 
+# ---- install on the tablet ----
+UI_SO = HWR / "build" / "librmpp-hwr-ui.so"
+REC_SO = HWR / "target" / "aarch64-unknown-linux-gnu" / "release" / "librmpp_hwr.so"
+
+
+def cmd_install(a):
+    """Put rmpp-hwr on the tablet: UI add-on in /usr/lib (loaded by rmpp-preload), recognizer, onnxruntime and
+    model in /home. A model already on the tablet (e.g. your personal one) is kept unless --model is given.
+    Run again after a reMarkable OS update (it replaces /usr/lib)."""
+    ort_so = Path(cfg("HWR_ORT_AARCH64", str(DEV / "sdk" / "onnxruntime-linux-aarch64-1.31.1" / "lib" / "libonnxruntime.so.1.31.1")))
+    ui_so, rec_so = UI_SO, REC_SO
+    if a.release or not (UI_SO.exists() and REC_SO.exists() and ort_so.exists()):
+        # no local build: prebuilt files from the GitHub release
+        import urllib.request
+        tag = a.release or "latest"
+        base = f"https://github.com/{cfg('HWR_REPO', 'lorancecall/rmpp-hwr')}/releases/" + \
+               ("latest/download" if tag == "latest" else f"download/{tag}")
+        cache = DATA / "release" / tag
+        cache.mkdir(parents=True, exist_ok=True)
+        for n in ("librmpp-hwr-ui.so", "librmpp_hwr.so", "libonnxruntime.so"):
+            if not (cache / n).exists() or tag == "latest":
+                print(f"downloading {n} ({tag})")
+                urllib.request.urlretrieve(f"{base}/{n}", cache / n)
+        ui_so, rec_so, ort_so = cache / "librmpp-hwr-ui.so", cache / "librmpp_hwr.so", cache / "libonnxruntime.so"
+    if not ssh(TABLET, "test -d /usr/lib/rmpp-preload.d && echo ok || true", capture=True).strip():
+        sys.exit("rmpp-preload is not installed on the tablet: `vellum add rmpp-preload` "
+                 "(https://github.com/lorancecall/rmpp-packages), then run `hwr install` again")
+    has_model = ssh(TABLET, f"test -f {DEV_DIR}/rec.onnx && echo yes || true", capture=True).strip() == "yes"
+    model = Path(a.model) if a.model else (None if has_model else BASE_MODEL)
+    with tempfile.TemporaryDirectory() as t:
+        st = Path(t)
+        shutil.copy(ui_so, st / "librmpp-hwr-ui.so.new")
+        shutil.copy(rec_so, st / "librmpp_hwr.so.new")
+        shutil.copy(ort_so, st / "libonnxruntime.so.new")
+        if model:
+            shutil.copy(model / "rec.onnx", st / "rec.onnx.new")
+            shutil.copy((model / "dict.txt") if (model / "dict.txt").exists() else BASE_MODEL / "dict.txt", st / "dict.txt.new")
+        ssh(TABLET, f"mkdir -p {DEV_DIR}")
+        run(["scp", "-q", *[p.name for p in st.iterdir()], f"{TABLET}:{DEV_DIR}/"], cwd=st)
+    names = ["librmpp_hwr.so", "libonnxruntime.so"] + (["rec.onnx", "dict.txt"] if model else [])
+    mv = " && ".join(f"mv -f {DEV_DIR}/{n}.new {DEV_DIR}/{n}" for n in names)
+    ssh(TABLET, "set -e\n"
+                f"{mv}\n"
+                "mount -o remount,rw /\n"
+                "mkdir -p /usr/lib/rmpp-hwr\n"
+                f"cp {DEV_DIR}/librmpp-hwr-ui.so.new /usr/lib/rmpp-hwr/librmpp-hwr-ui.so.new\n"
+                "mv -f /usr/lib/rmpp-hwr/librmpp-hwr-ui.so.new /usr/lib/rmpp-hwr/librmpp-hwr-ui.so\n"
+                f"rm -f {DEV_DIR}/librmpp-hwr-ui.so.new\n"
+                "ln -sf /usr/lib/rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp-preload.d/60-rmpp-hwr.so\n"
+                "sync\n"
+                "systemctl reset-failed xochitl || true\n"
+                "systemctl restart xochitl\n"
+                "sleep 3\n"
+                "mount -o remount,ro / || echo 'warning: / is still read-write'\n"
+                "systemctl is-active xochitl")
+    print(f"rmpp-hwr installed ({'model ' + str(model) if model else 'kept the model on the tablet'}); "
+          "Convert page is in the toolbar, settings in Settings > Handwriting")
+
+
+def cmd_uninstall(a):
+    """Remove the UI add-on and the recognizer; with --purge also the model, records and settings."""
+    extra = f"rm -rf {DEV_DIR} /home/root/.config/rmpp-hwr\n" if a.purge else \
+        f"rm -f {DEV_DIR}/librmpp_hwr.so* {DEV_DIR}/libonnxruntime.so\n"
+    ssh(TABLET, "set -e\n"
+                "mount -o remount,rw /\n"
+                "rm -f /usr/lib/rmpp-preload.d/60-rmpp-hwr.so\n"
+                "rm -rf /usr/lib/rmpp-hwr\n"
+                "sync\n"
+                "systemctl reset-failed xochitl || true\n"
+                "systemctl restart xochitl\n"
+                "sleep 3\n"
+                "mount -o remount,ro / || echo 'warning: / is still read-write'\n" + extra)
+    print("rmpp-hwr removed" + (" with all data" if a.purge else "; model, records and settings kept (--purge removes them)"))
+
+
 # ---- tablet model ----
 def cmd_deploy(a):
     d = OUT / a.name
@@ -578,6 +655,13 @@ def main():
     p = sp.add_parser("deploy"); p.add_argument("name"); p.set_defaults(f=cmd_deploy)
     sp.add_parser("rollback").set_defaults(f=cmd_rollback)
     sp.add_parser("models").set_defaults(f=cmd_models)
+    p = sp.add_parser("install", help="install rmpp-hwr on the tablet (needs rmpp-preload)")
+    p.add_argument("--model", help="model folder with rec.onnx (+ dict.txt) to install; default: keep the tablet's")
+    p.add_argument("--release", help="use prebuilt files from this GitHub release tag (default when there is no local build)")
+    p.set_defaults(f=cmd_install)
+    p = sp.add_parser("uninstall", help="remove rmpp-hwr from the tablet")
+    p.add_argument("--purge", action="store_true", help="also delete model, records and settings")
+    p.set_defaults(f=cmd_uninstall)
     sp.add_parser("sync").set_defaults(f=cmd_sync)
     sp.add_parser("setup").set_defaults(f=cmd_setup)
     p = sp.add_parser("contribute", help="share practice v2 pages with the open dataset (anonymized PR)")

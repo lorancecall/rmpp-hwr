@@ -3,8 +3,9 @@
 Handwriting recognition (Korean, English, digits) for the reMarkable Paper Pro, running on the tablet's CPU,
 plus the tools to collect your own handwriting and train a personal model.
 
-> Status: experimental, not packaged yet. The tablet UI is installed by hand for now; a Vellum package will
-> follow in [rmpp-packages](https://github.com/lorancecall/rmpp-packages).
+> Status: experimental. rmpp-hwr is installed and updated with its own PC tool (`hwr install`), not as a Vellum
+> package, because models change often. It only needs `rmpp-preload` from
+> [rmpp-packages](https://github.com/lorancecall/rmpp-packages) on the tablet.
 
 ## What is here
 
@@ -26,15 +27,26 @@ plus the tools to collect your own handwriting and train a personal model.
 - Open dataset: [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db) (Korean guide:
   https://lorancecall.github.io/rmpp-hwr-db/). `hwr contribute` shares structured practice pages, anonymized.
 
-## Setup (PC)
+## Install
+
+Requirements: reMarkable Paper Pro with developer mode and SSH (an `ssh rmpp` alias with a key), OS 3.29,
+and `rmpp-preload` on the tablet (`vellum add rmpp-preload`, see rmpp-packages).
+
+On the PC:
 
 ```sh
-uv venv .venv && uv pip install -r rmpp-hwr/collect/requirements.txt
-cp rmpp-hwr/.env.example rmpp-hwr/.env      # tablet address, training backend; never committed
-rmpp-hwr/tools/hwr --help
+git clone https://github.com/lorancecall/rmpp-hwr && cd rmpp-hwr
+uv venv ../.venv && uv pip install -p ../.venv -r collect/requirements.txt
+cp .env.example .env              # tablet address etc.; never committed
+tools/hwr install                 # UI add-on + recognizer + model onto the tablet
 ```
 
-The cross-compile toolchain and onnxruntime are expected in `../sdk` (see `.cargo/config.toml` and `ui/build.sh`).
+`hwr install` keeps a model that is already on the tablet (pass `--model DIR` to replace it). Run it again after
+a reMarkable OS update. `hwr uninstall [--purge]` removes it.
+
+Building from source needs the Arm GNU aarch64 toolchain, Qt 6.10 headers/device libs and onnxruntime for
+linux-aarch64 in `../sdk` (see `.cargo/config.toml` and `ui/build.sh`):
+`ui/build.sh` and `cargo build --release --target aarch64-unknown-linux-gnu`.
 
 ## Privacy
 
