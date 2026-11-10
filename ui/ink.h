@@ -86,7 +86,9 @@ int addInkStrokes(QObject *sc, QObject *ph, const QList<QList<QPointF>> &strokes
     if (add < 0 || type.sizeOf() != 88) return -1;
     bool ok = false;
     int tool = ph->property("lineTool").toInt(&ok);
-    if (!ok) tool = 15;   // Ballpointv2
+    // with the lasso active the "pen" is the selection tool (11), and erasers/highlighters make no sense for text
+    static const QList<int> pens{1, 2, 3, 4, 7, 12, 13, 14, 15, 16, 17, 21};
+    if (!ok || !pens.contains(tool)) tool = 15;   // Ballpointv2
     const int color = ph->property("lineColor").toInt();
     const uint argb = ph->property("lineArgbCode").toUInt();
     double thick = ph->property("lineThickness").toDouble();
@@ -114,7 +116,7 @@ QRectF selectionRect(QObject *sc, int layer) {
     const int bound = mo->indexOfMethod("getItemBoundingRect(QList<std::shared_ptr<SceneItem>>)");
     if (clone < 0 || bound < 0 || sc->property("selectionItemCount").toInt() <= 0) return {};
     QList<std::shared_ptr<void>> items;
-    double scale = 0;
+    double scale = 1.0;   // 0 yields an empty rect
     void *a1[] = {&items, &layer, &scale};
     sc->qt_metacall(QMetaObject::InvokeMetaMethod, clone, a1);
     QRectF r;
@@ -190,6 +192,7 @@ void convertSelectionToInk(bool replace) {
                                                           sc->property("pageId").toString());
     setStatus(QStringLiteral("Converting…"), true);
     QPointer<QObject> scp(sc), php(ph);
+    QPointer<QQuickItem> dvp(dv);
     std::thread([=] {
         QString err;
         QByteArray out(64 * 1024, '\0');
@@ -204,9 +207,17 @@ void convertSelectionToInk(bool replace) {
             if (n <= 0) { setStatus(QStringLiteral("no handwriting recognized in the selection"), false); return; }
             qWarning("[rmpp-hwr] ink: %s", qPrintable(lines.join(QLatin1String(" | "))));
             const QList<QList<QPointF>> strokes = placeLines(lines, sel, replace);
+            // addDrawingLine is ignored while a selection is active: delete (replace) or deselect it first, then add
+            // once the scene has settled
             if (replace) QMetaObject::invokeMethod(scp, "deleteSelectedItems", Q_ARG(int, layer));
-            const int added = addInkStrokes(scp, php, strokes);
-            setStatus(added < 0 ? QStringLiteral("this xochitl version is not supported") : QString(), false);
+            else QMetaObject::invokeMethod(scp, "clearSelectedItems");
+            QTimer::singleShot(400, scp, [scp, php, dvp, strokes] {
+                if (!scp || !php) { setStatus(QStringLiteral("page closed"), false); return; }
+                const int added = addInkStrokes(scp, php, strokes);
+                // lines added this way are not drawn until the next redraw; this is what the pen path calls
+                if (dvp) QMetaObject::invokeMethod(dvp, "updateAfterStroke");
+                setStatus(added < 0 ? QStringLiteral("this xochitl version is not supported") : QString(), false);
+            });
         }, Qt::QueuedConnection);
     }).detach();
 }
