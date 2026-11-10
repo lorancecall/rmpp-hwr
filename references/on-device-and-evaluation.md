@@ -65,3 +65,29 @@ Scope: what keeps the model small/fast on the Paper Pro CPU (onnxruntime, ~0.4 s
 5. **Always include the base model** as a row in every comparison, evaluated through the *same* code path, so pipeline bugs show up as a base-model mismatch.
 6. **Training-set CER is a diagnostic**: if a fine-tuned model is worse than the base model on its own training lines (as currently observed), suspect the pipeline (BN stats, precision, preprocessing mismatch, label encoding/filtering) before suspecting data.
 7. **Normalize text consistently** (Unicode NFC for Hangul; decide on full-width vs half-width punctuation) in both references and predictions before computing CER; NFD vs NFC mismatches silently inflate Korean CER.
+
+## rmpp-hwr model comparison (2026-11-10)
+
+Same line images, NFC + whitespace-normalized CER (`train/jobs/bench.sh`, `train/scripts/bench.py`). The
+on-device models get height-48 inputs exactly like the tablet; the large models get the higher-resolution
+originals (personal lines) or 2x-upscaled 48-px images (stroke-dataset lines), padded, on an L40 GPU.
+`personal-eval12` = the 12 held-out lines of the developer; `personal-other` = the other 88 personal lines
+(trained on by fix1, so not comparable for fix1); `other-writers` = 239 rendered lines of the public stroke set
+(single writer, held-out sentences; fix1 trained on other sentences of the same writer).
+
+| model | size | personal-eval12 | personal-other | other-writers | GPU s/line |
+|---|---|---|---|---|---|
+| PaddleOCR korean_PP-OCRv5_mobile_rec (base, on device) | 13 MB | 0.257 | 0.256 | 0.365 | - |
+| **fix1 = base fine-tuned (on device)** | 13 MB | **0.098** | (0.025, trained) | (0.105) | - |
+| team-lucid/trocr-small-korean | small | 0.224 | 0.238 | 0.189 | 0.08 |
+| PaddlePaddle/PaddleOCR-VL (0.9B) | 0.9B | 0.388 | 0.406 | 0.303 | 0.72 |
+| Qwen/Qwen3-VL-4B-Instruct | 4B | 0.213 | 0.165 | 0.347 | - |
+| Qwen/Qwen3-VL-8B-Instruct | 8B | 0.202 | 0.107 | 0.193 | 0.56 |
+| stepfun-ai/GOT-OCR-2.0-hf | 0.6B | not measured (RuntimeError on every line in our script) | | | |
+
+Takeaways **[our inference]**: zero-shot, the best large model (Qwen3-VL-8B) beats the base on-device model on
+handwriting, but the fine-tuned 13 MB model (fix1) beats every zero-shot model on the held-out personal lines
+(0.098 vs 0.202). For a personal recognizer, fine-tuning the small on-device model is the better path; a large
+VLM is a candidate only for an optional server-side "high accuracy" mode, and would itself need fine-tuning to
+compete. fix1's remaining errors on the held-out lines are mostly spaces, an added final period, and occasional
+single digits/letters (`train/scripts/errors.py`).

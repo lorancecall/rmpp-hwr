@@ -224,8 +224,11 @@ class Backend:
         else:
             shutil.copy2(Path(self.work) / rel, local_path)
 
-    def submit(self, name, steps):
-        """steps = [(job, [args], res)], run in order; each starts only if the previous one succeeded."""
+    def submit(self, name, steps, env=None):
+        """steps = [(job, [args], res)], run in order; each starts only if the previous one succeeded.
+        env: extra variables for every step, e.g. {"EPOCHS": "4"} (read by the job scripts)."""
+        pre = " ".join(f"{k}={v}" for k, v in (env or {}).items())
+        pre = f"env {pre} " if pre else ""
         if self.kind == "slurm":
             prev = None
             for job, args, res in steps:
@@ -241,12 +244,12 @@ class Backend:
                 if prev:
                     opts += [f"--dependency=afterok:{prev}"]
                 jn = f"hwr-{name}-{Path(job).stem}"
-                wrap = " ".join(["bash", "code/jobs/run.sh", job, *args])
+                wrap = pre + " ".join(["bash", "code/jobs/run.sh", job, *args])
                 prev = self.sh(f"mkdir -p logs && sbatch --parsable -J {jn} -o logs/{jn}-%j.out {' '.join(opts)} "
                                f"--wrap '{wrap}'", capture=True).strip().split(";")[0]
                 print(f"submitted {jn}: job {prev}")
         else:
-            cmds = [f"bash code/jobs/run.sh {job} {' '.join(args)} > logs/hwr-{name}-{Path(job).stem}.log 2>&1"
+            cmds = [f"{pre}bash code/jobs/run.sh {job} {' '.join(args)} > logs/hwr-{name}-{Path(job).stem}.log 2>&1"
                     for job, args, _ in steps]
             script = (f"cd '{self.work}' && mkdir -p logs && echo running > logs/hwr-{name}.state && "
                       f"( {' && '.join(cmds)} ) && echo done > logs/hwr-{name}.state || echo failed > logs/hwr-{name}.state")
@@ -311,7 +314,8 @@ def cmd_train(a):
     b = Backend()
     cmd_upload(a)
     b.sync()
-    b.submit(name, [("gen_personal.sh", [name], "cpu"), ("train.sh", [name], "gpu"), ("export.sh", [name], "gpu-short")])
+    env = {k: v for k, v in (("EPOCHS", a.epochs), ("LR", a.lr), ("FROM", a.from_)) if v}
+    b.submit(name, [("gen_personal.sh", [name], "cpu"), ("train.sh", [name], "gpu"), ("export.sh", [name], "gpu-short")], env)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "last-train.txt").write_text(name + "\n", encoding="utf-8")
     print(f"started {name}; check with `hwr status`, then `hwr fetch {name}`")
@@ -648,7 +652,10 @@ def main():
     p = sp.add_parser("qc", help="check collected lines (labels vs writing) before training")
     p.add_argument("--cer", type=float, default=0.6, help="flag lines whose base-model CER is above this")
     p.set_defaults(f=cmd_qc)
-    p = sp.add_parser("train"); p.add_argument("name", nargs="?"); p.set_defaults(f=cmd_train)
+    p = sp.add_parser("train"); p.add_argument("name", nargs="?")
+    p.add_argument("--epochs", help="training epochs (default 2)"); p.add_argument("--lr", help="learning rate (default 5e-5)")
+    p.add_argument("--from", dest="from_", choices=["best", "base"], help="start from best.txt (default) or the base model")
+    p.set_defaults(f=cmd_train)
     p = sp.add_parser("status"); p.add_argument("--lines", type=int, default=3); p.set_defaults(f=cmd_status)
     p = sp.add_parser("fetch"); p.add_argument("name"); p.set_defaults(f=cmd_fetch)
     p = sp.add_parser("eval"); p.add_argument("name", nargs="?"); p.set_defaults(f=cmd_eval)

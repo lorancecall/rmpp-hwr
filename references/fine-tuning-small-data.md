@@ -151,5 +151,11 @@ Notes marked **[our inference]** are reasoning applied to our setup, not results
   statistics** on zero-padded wide images. **Pooling patch + frozen BN (`FREEZE_BN=1`) -> 0.25-0.30 / 15**, better than
   width 320 (0.20 / 25). Both are now the defaults in `run.sh`. bf16 O2 AMP with the pooling patch alone: 0.00 / 68
   (AMP with frozen BN not tested yet).
+- rmpp-hwr result (2026-11-10), first retrain with both fixes (`fix1`: width 960, `HWR_EVAL_POOL=1`, `FREEZE_BN=1`,
+  fp32, Adam 5e-5, 2 epochs, 17.6k augmented personal lines from 88 real ones + 40k synthetic replay):
+  CER personal held-out 12 lines **0.257 -> 0.098** (same result through the on-device Rust/onnxruntime path),
+  other-writer strokes 0.365 -> 0.105 (note: that stroke set is a single writer, split by sentence, so this is
+  optimistic), mixed synthetic 0.241 -> 0.086, Korean synthetic 0.183 -> 0.051, English synthetic 0.140 -> 0.084.
+  No forgetting of English this time. 12 held-out lines is still a small test set (see on-device-and-evaluation.md).
 - Also found: the collected personal data had 3 lines longer than `max_text_length` 40; PaddleOCR drops them
   silently (`hwr qc` flags them).

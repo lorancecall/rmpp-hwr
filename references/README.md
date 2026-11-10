@@ -53,6 +53,8 @@ Later / longer-term: jamo-level output vocabulary for rare syllables (Kim et al.
 6. Update the `Last updated:` line of the file you edited and of this README, and revise the ranked list if the new source changes priorities. Record results of experiments that confirm or refute an entry under that entry as `- rmpp-hwr result (<date>): ...`.
 
 ## Changelog
+- 2026-11-10: Model comparison (Qwen3-VL, PaddleOCR-VL, TrOCR-ko vs on-device base and fix1) in on-device-and-evaluation.md.
+- 2026-11-10: fix1 retrain result (personal CER 0.257 -> 0.098) recorded in fine-tuning-small-data.md.
 - 2026-11-10: Recorded the training-mode pooling bug (fine-tuning-small-data.md, "rmpp-hwr findings").
 - 2026-11-10: Added IAM-OnDB dataset entry (online-vs-offline.md); jbaudanza source/license verified (Hugging Face, CC-BY-SA-4.0).
 - 2026-11-10: Initial version. Six topic files, about 45 sources (papers, datasets, official docs/configs), each checked against arXiv/DOI/venue pages.
