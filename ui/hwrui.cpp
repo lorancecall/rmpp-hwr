@@ -1,0 +1,718 @@
+// rmpp-hwr UI glue, loaded into xochitl with LD_PRELOAD (via rmpp-preload).
+// Adds "Convert page" (and Settings > Handwriting) next to xochitl's own "Convert to text" tool. On click it reads the
+// current page file, recognizes it with librmpp_hwr.so (Rust, loaded only on first use), adds a page after the
+// current one and types the text there.
+#include <dlfcn.h>
+#include <functional>
+#include <thread>
+
+#include <QtCore/QCoreApplication>
+#include <QtCore/QDateTime>
+#include <QtCore/QDir>
+#include <QtCore/QFile>
+#include <QtCore/QFileInfo>
+#include <QtCore/QHash>
+#include <cstdio>
+#include <QtCore/QJsonArray>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QPointer>
+#include <QtCore/QSettings>
+#include <QtCore/QTimer>
+#include <QtGui/QGuiApplication>
+#include <QtGui/QInputMethodEvent>
+#include <QtGui/QKeyEvent>
+#include <QtGui/QWindow>
+#include <QtQml/QQmlComponent>
+#include <QtQml/QQmlContext>
+#include <QtQml/QQmlEngine>
+#include <QtQml/QQmlPropertyMap>
+#include <QtQuick/QQuickItem>
+#include <QtQuick/QQuickWindow>
+
+namespace {
+
+const char *kLibDir = "/home/root/.local/share/rmpp-hwr";   // librmpp_hwr.so, libonnxruntime.so, rec.onnx, dict.txt
+const char *kPages = "/home/root/.local/share/remarkable/xochitl";
+
+const char *kConf = "/home/root/.config/rmpp-hwr/settings.conf";
+
+// busy, status, command (written by QML), settings hideNative / collect, info modelName / modelInfo / conversions
+QQmlPropertyMap *g_state = nullptr;
+bool g_confLoaded = false;
+
+// ---- settings (Settings > Handwriting) ----
+// /home is mounted after xochitl starts: load once it is there, defaults until then.
+void loadSettings() {
+    if (g_confLoaded || !QFileInfo::exists(QStringLiteral("/home/root/.local"))) return;
+    g_confLoaded = true;
+    QSettings s(QLatin1String(kConf), QSettings::IniFormat);
+    g_state->insert(QStringLiteral("hideNative"), s.value(QStringLiteral("hideNative"), false).toBool());
+    g_state->insert(QStringLiteral("collect"), s.value(QStringLiteral("collect"), true).toBool());
+}
+
+void saveSetting(const QString &key, bool v) {
+    g_state->insert(key, v);
+    QDir().mkpath(QFileInfo(QLatin1String(kConf)).path());
+    QSettings s(QLatin1String(kConf), QSettings::IniFormat);
+    s.setValue(key, v);
+    s.sync();
+}
+
+// ---- recognizer library (dlopen on first use; the model loads only for Convert page) ----
+struct Hwr {
+    void *lib = nullptr;
+    void *rec = nullptr;
+    void *(*open)(const char *) = nullptr;
+    int (*page)(const void *, const char *, char *, size_t) = nullptr;
+    int (*text)(const char *, char *, size_t) = nullptr;
+};
+Hwr g_hwr;
+
+bool loadLib(QString *err) {
+    if (g_hwr.lib) return true;
+    const QByteArray so = QByteArray(kLibDir) + "/librmpp_hwr.so";
+    g_hwr.lib = dlopen(so.constData(), RTLD_NOW | RTLD_LOCAL);
+    if (!g_hwr.lib) { *err = QString::fromLocal8Bit(dlerror()); return false; }
+    g_hwr.open = reinterpret_cast<void *(*)(const char *)>(dlsym(g_hwr.lib, "rmpp_hwr_open"));
+    g_hwr.page = reinterpret_cast<int (*)(const void *, const char *, char *, size_t)>(dlsym(g_hwr.lib, "rmpp_hwr_page"));
+    g_hwr.text = reinterpret_cast<int (*)(const char *, char *, size_t)>(dlsym(g_hwr.lib, "rmpp_hwr_text"));
+    return true;
+}
+
+bool loadRecognizer(QString *err) {
+    if (g_hwr.rec) return true;
+    if (!loadLib(err)) return false;
+    if (!g_hwr.open || !g_hwr.page) { *err = QStringLiteral("symbols missing"); return false; }
+    g_hwr.rec = g_hwr.open(kLibDir);
+    if (!g_hwr.rec) { *err = QStringLiteral("model failed to load"); return false; }
+    return true;
+}
+
+// Typed text of a page file, non-empty paragraphs only.
+QStringList pageText(const QString &doc, const QString &page) {
+    QString err;
+    if (!loadLib(&err) || !g_hwr.text) return {};
+    const QString path = QStringLiteral("%1/%2/%3.rm").arg(QLatin1String(kPages), doc, page);
+    QByteArray out(64 * 1024, '\0');
+    if (g_hwr.text(path.toUtf8().constData(), out.data(), out.size()) < 0) return {};
+    QStringList lines;
+    for (const QString &l : QString::fromUtf8(out.constData()).split(QLatin1Char('\n')))
+        if (!l.trimmed().isEmpty()) lines << l.trimmed();
+    return lines;
+}
+
+// ---- conversion records (conversions.jsonl, one JSON object per Convert page) ----
+// fields: time, doc, src (handwritten page), dst (typed page), lines (recognized), corrected (time, when the
+// user pressed "Done correcting"; only those records are used for training).
+QString recordsPath() { return QLatin1String(kLibDir) + QStringLiteral("/conversions.jsonl"); }
+
+QList<QJsonObject> readRecords() {
+    QList<QJsonObject> out;
+    QFile f(recordsPath());
+    if (!f.open(QIODevice::ReadOnly)) return out;
+    while (!f.atEnd()) {
+        const QJsonObject o = QJsonDocument::fromJson(f.readLine()).object();
+        if (!o.isEmpty()) out << o;
+    }
+    return out;
+}
+
+void writeRecords(const QList<QJsonObject> &recs) {
+    if (recs.isEmpty()) { QFile::remove(recordsPath()); return; }
+    QByteArray all;
+    for (const QJsonObject &o : recs) all += QJsonDocument(o).toJson(QJsonDocument::Compact) + '\n';
+    QFile w(recordsPath() + QStringLiteral(".new"));
+    if (w.open(QIODevice::WriteOnly) && w.write(all) == all.size() && w.flush()) {
+        w.close();
+        ::rename(qPrintable(w.fileName()), qPrintable(recordsPath()));
+    }
+}
+
+QHash<QString, QString> g_dstToTime;   // typed page id -> record time, for the toolbar button
+QHash<QString, bool> g_dstDone;
+
+void indexRecords(const QList<QJsonObject> &recs) {
+    g_dstToTime.clear();
+    g_dstDone.clear();
+    for (const QJsonObject &o : recs) {
+        const QString dst = o.value(QStringLiteral("dst")).toString();
+        g_dstToTime[dst] = o.value(QStringLiteral("time")).toString();
+        g_dstDone[dst] = o.contains(QStringLiteral("corrected"));
+    }
+}
+
+// Notebook name and the 1-based page number of a page id.
+QPair<QString, int> docPage(const QString &doc, const QString &page) {
+    QFile mf(QStringLiteral("%1/%2.metadata").arg(QLatin1String(kPages), doc));
+    const QString name = mf.open(QIODevice::ReadOnly)
+        ? QJsonDocument::fromJson(mf.readAll()).object().value(QStringLiteral("visibleName")).toString() : QString();
+    QFile cf(QStringLiteral("%1/%2.content").arg(QLatin1String(kPages), doc));
+    int n = 0;
+    if (cf.open(QIODevice::ReadOnly)) {
+        const QJsonObject c = QJsonDocument::fromJson(cf.readAll()).object();
+        const QJsonArray pages = c.value(QStringLiteral("cPages")).toObject().value(QStringLiteral("pages")).toArray();
+        int i = 0;
+        for (const QJsonValue &p : pages) {
+            const QJsonObject po = p.toObject();
+            if (po.contains(QStringLiteral("deleted"))) continue;
+            ++i;
+            if (po.value(QStringLiteral("id")).toString() == page) { n = i; break; }
+        }
+    }
+    return {name, n};
+}
+
+void refreshInfo() {
+    const QString dir = QLatin1String(kLibDir);
+    QFileInfo m(dir + QStringLiteral("/rec.onnx"));
+    QString name = QStringLiteral("PP-OCRv5 Korean (base model)");
+    QFile nf(dir + QStringLiteral("/model.txt"));   // first line names the installed model, written on deploy
+    if (nf.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        const QString l = QString::fromUtf8(nf.readLine()).trimmed();
+        if (!l.isEmpty()) name = l;
+    }
+    g_state->insert(QStringLiteral("modelName"), m.exists() ? name : QStringLiteral("Model not installed"));
+    g_state->insert(QStringLiteral("modelInfo"), m.exists()
+        ? QStringLiteral("%1 MB, installed %2").arg(m.size() / 1048576.0, 0, 'f', 1)
+              .arg(m.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm")))
+        : QStringLiteral("Put rec.onnx and dict.txt in %1").arg(dir));
+    // Saved conversions, newest first: notebook, page, status.
+    const QList<QJsonObject> recs = readRecords();
+    indexRecords(recs);
+    QJsonArray items;
+    int done = 0;
+    for (const QJsonObject &o : recs) {
+        const QString doc = o.value(QStringLiteral("doc")).toString();
+        const auto [nb, pg] = docPage(doc, o.value(QStringLiteral("src")).toString());
+        const QDateTime t = QDateTime::fromString(o.value(QStringLiteral("time")).toString(), Qt::ISODate).toLocalTime();
+        const bool corrected = o.contains(QStringLiteral("corrected"));
+        done += corrected;
+        items.prepend(QJsonObject{{QStringLiteral("time"), o.value(QStringLiteral("time"))},
+                                  {QStringLiteral("when"), t.toString(QStringLiteral("yyyy-MM-dd HH:mm"))},
+                                  {QStringLiteral("name"), nb.isEmpty() ? QStringLiteral("(deleted notebook)") : nb},
+                                  {QStringLiteral("page"), pg},
+                                  {QStringLiteral("dpage"), docPage(doc, o.value(QStringLiteral("dst")).toString()).second},
+                                  {QStringLiteral("corrected"), corrected},
+                                  {QStringLiteral("lines"), o.value(QStringLiteral("lines")).toArray().size()}});
+    }
+    g_state->insert(QStringLiteral("conversions"), int(items.size()));
+    g_state->insert(QStringLiteral("correctedCount"), done);
+    g_state->insert(QStringLiteral("items"), QString::fromUtf8(QJsonDocument(items).toJson(QJsonDocument::Compact)));
+}
+
+// What one record holds: recognized lines and the current text of its typed page.
+void showRecord(const QString &time) {
+    for (const QJsonObject &o : readRecords()) {
+        if (o.value(QStringLiteral("time")).toString() != time) continue;
+        QJsonObject d{{QStringLiteral("time"), time},
+                      {QStringLiteral("recognized"), o.value(QStringLiteral("lines"))},
+                      {QStringLiteral("text"), QJsonArray::fromStringList(
+                          pageText(o.value(QStringLiteral("doc")).toString(), o.value(QStringLiteral("dst")).toString()))}};
+        g_state->insert(QStringLiteral("detail"), QString::fromUtf8(QJsonDocument(d).toJson(QJsonDocument::Compact)));
+        return;
+    }
+    g_state->insert(QStringLiteral("detail"), QString());
+}
+
+// Mark a record corrected (on) or back to waiting (off).
+void markRecord(const QString &time, bool on) {
+    QList<QJsonObject> recs = readRecords();
+    for (QJsonObject &o : recs)
+        if (o.value(QStringLiteral("time")).toString() == time) {
+            if (on) o.insert(QStringLiteral("corrected"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+            else o.remove(QStringLiteral("corrected"));
+        }
+    writeRecords(recs);
+    refreshInfo();
+}
+
+// Drop saved conversion records (all when time is empty). The notebook pages themselves are not touched.
+void deleteConversions(const QString &time) {
+    QList<QJsonObject> recs;
+    for (const QJsonObject &o : readRecords()) {
+        if (time.isEmpty() || o.value(QStringLiteral("time")).toString() == time) {
+            const QString ink = o.value(QStringLiteral("ink")).toString();
+            if (!ink.isEmpty()) QFile::remove(QLatin1String(kLibDir) + QLatin1Char('/') + ink);
+        } else {
+            recs << o;
+        }
+    }
+    writeRecords(recs);
+    refreshInfo();
+}
+
+// ---- item tree helpers ----
+QQuickItem *findItem(QQuickItem *root, const std::function<bool(QQuickItem *)> &pred, int depth = 0) {
+    if (!root || depth > 250) return nullptr;
+    if (pred(root)) return root;
+    const auto kids = root->childItems();
+    for (QQuickItem *k : kids)
+        if (QQuickItem *f = findItem(k, pred, depth + 1)) return f;
+    return nullptr;
+}
+
+QQuickItem *findAnywhere(const std::function<bool(QQuickItem *)> &pred) {
+    for (QWindow *w : QGuiApplication::allWindows())
+        if (auto *qw = qobject_cast<QQuickWindow *>(w))
+            if (QQuickItem *f = findItem(qw->contentItem(), pred)) return f;
+    return nullptr;
+}
+
+bool classStarts(QObject *o, const char *prefix) {
+    return qstrncmp(o->metaObject()->className(), prefix, qstrlen(prefix)) == 0;
+}
+
+void setStatus(const QString &s, bool busy) {
+    g_state->insert(QStringLiteral("status"), s);
+    g_state->insert(QStringLiteral("busy"), busy);
+    if (!s.isEmpty()) qWarning("[rmpp-hwr] %s", qPrintable(s));
+}
+
+// ---- typing the result on the new page ----
+void typeText(const QStringList &lines) {
+    QObject *focus = QGuiApplication::focusObject();
+    if (!focus) { setStatus(QStringLiteral("no text field to type into"), false); return; }
+    for (int i = 0; i < lines.size(); ++i) {
+        if (i > 0) {
+            QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier, QStringLiteral("\r"));
+            QKeyEvent release(QEvent::KeyRelease, Qt::Key_Return, Qt::NoModifier, QStringLiteral("\r"));
+            QCoreApplication::sendEvent(focus, &press);
+            QCoreApplication::sendEvent(focus, &release);
+        }
+        QInputMethodEvent im;
+        im.setCommitString(lines[i]);
+        QCoreApplication::sendEvent(focus, &im);
+    }
+    setStatus(QString(), false);
+}
+
+// One JSON line per conversion: the handwritten source page (original), the recognized lines (converted) and
+// the page they were typed on, whose text the user may correct later (corrected). Collected over SSH for training.
+void logConversion(const QString &doc, const QString &src, const QString &dst, const QStringList &lines,
+                   const QString &ink) {
+    if (!g_state->value(QStringLiteral("collect")).toBool()) {
+        if (!ink.isEmpty()) QFile::remove(QLatin1String(kLibDir) + QLatin1Char('/') + ink);
+        return;
+    }
+    QDir().mkpath(QLatin1String(kLibDir));
+    QFile f(QStringLiteral("%1/conversions.jsonl").arg(QLatin1String(kLibDir)));
+    if (!f.open(QIODevice::Append | QIODevice::Text)) return;
+    const QString time = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    QJsonObject o{{QStringLiteral("time"), time},
+                  {QStringLiteral("doc"), doc}, {QStringLiteral("src"), src}, {QStringLiteral("dst"), dst},
+                  {QStringLiteral("lines"), QJsonArray::fromStringList(lines)}};
+    if (!ink.isEmpty()) o.insert(QStringLiteral("ink"), ink);
+    f.write(QJsonDocument(o).toJson(QJsonDocument::Compact) + '\n');
+    g_dstToTime[dst] = time;
+    g_dstDone[dst] = false;
+}
+
+// Toolbar state: is the open page a typed page made by Convert page, and is it marked corrected?
+void updateCurrentPage() {
+    static bool indexed = false;
+    if (!indexed && g_confLoaded) { indexRecords(readRecords()); indexed = true; }
+    QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
+    const QString pid = dv ? dv->property("currentPageId").toString() : QString();
+    const QString t = g_dstToTime.value(pid);
+    if (g_state->value(QStringLiteral("textPage")).toString() != t) g_state->insert(QStringLiteral("textPage"), t);
+    const bool done = g_dstDone.value(pid);
+    if (g_state->value(QStringLiteral("textPageDone")).toBool() != done) g_state->insert(QStringLiteral("textPageDone"), done);
+}
+
+void insertOnNextPage(QPointer<QQuickItem> dv, int fromPage, const QStringList &lines) {
+    if (!dv) { setStatus(QStringLiteral("document closed"), false); return; }
+    QVariant doc = dv->property("document");
+    QMetaObject::invokeMethod(dv, "addPage", Q_ARG(QVariant, doc), Q_ARG(QVariant, QVariant()));
+    // wait for the new page to open, then enter typing mode and type
+    auto *timer = new QTimer(dv);
+    auto tries = std::make_shared<int>(0);
+    QObject::connect(timer, &QTimer::timeout, dv, [dv, timer, tries, fromPage, lines] {
+        if (!dv) return;
+        if (dv->property("currentPage").toInt() != fromPage + 1 || dv->property("addingPage").toBool()) {
+            if (++*tries > 40) { timer->deleteLater(); setStatus(QStringLiteral("new page did not open"), false); }
+            return;
+        }
+        timer->deleteLater();
+        if (QObject *d = dv->property("document").value<QObject *>())
+            logConversion(d->property("id").toString(), dv->property("_rmppHwrSrc").toString(),
+                          dv->property("currentPageId").toString(), lines, dv->property("_rmppHwrInk").toString());
+        QMetaObject::invokeMethod(dv, "enterTextMode", Q_ARG(QVariant, true), Q_ARG(QVariant, QVariant()));
+        QTimer::singleShot(400, dv, [lines] { typeText(lines); });
+    });
+    timer->start(150);
+}
+
+void convertCurrentPage() {
+    if (g_state->value(QStringLiteral("busy")).toBool()) return;
+    QQuickItem *dvItem = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
+    if (!dvItem) { setStatus(QStringLiteral("no open document"), false); return; }
+    QPointer<QQuickItem> dv(dvItem);
+    QObject *doc = dv->property("document").value<QObject *>();
+    const QString docId = doc ? doc->property("id").toString() : QString();
+    const QString pageId = dv->property("currentPageId").toString();
+    const int page = dv->property("currentPage").toInt();
+    const QString path = QStringLiteral("%1/%2/%3.rm").arg(QLatin1String(kPages), docId, pageId);
+    if (docId.isEmpty() || pageId.isEmpty() || !QFile::exists(path)) {
+        setStatus(QStringLiteral("page file not found (%1)").arg(path), false);
+        return;
+    }
+    setStatus(QStringLiteral("Converting…"), true);
+    dv->setProperty("_rmppHwrSrc", pageId);
+    // Keep a copy of exactly the ink that is recognized: later edits or deleting the page don't change the sample.
+    QDir().mkpath(QLatin1String(kLibDir) + QStringLiteral("/ink"));
+    const QString ink = QStringLiteral("ink/%1-%2.rm").arg(pageId).arg(QDateTime::currentMSecsSinceEpoch());
+    dv->setProperty("_rmppHwrInk", QFile::copy(path, QLatin1String(kLibDir) + QLatin1Char('/') + ink) ? ink : QString());
+    std::thread([dv, page, path] {
+        QString err;
+        QStringList lines;
+        if (loadRecognizer(&err)) {
+            QByteArray out(64 * 1024, '\0');
+            const int n = g_hwr.page(g_hwr.rec, path.toUtf8().constData(), out.data(), out.size());
+            if (n < 0) err = QStringLiteral("recognition failed");
+            else lines = QString::fromUtf8(out.constData()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        }
+        QMetaObject::invokeMethod(qApp, [dv, page, lines, err] {
+            if (!err.isEmpty()) { setStatus(err, false); return; }
+            if (lines.isEmpty()) { setStatus(QStringLiteral("no handwriting found on this page"), false); return; }
+            qWarning("[rmpp-hwr] %lld lines recognized", (long long)lines.size());
+            insertOnNextPage(dv, page, lines);
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
+// ---- toolbar button next to "Convert to text" ----
+const char *kButtonQml = R"QML(
+import QtQuick
+import xofm.libs.toolbar
+ToolbarTool {
+    objectName: "rmppHwrButton"
+    type: ToolbarTool.Type.FoldoutButton
+    shouldShow: toolbar.notePage
+    label: hwr.busy ? "Converting…" : "Convert page"
+    iconSource: "qrc:/ark/icons/hwc"
+    onClicked: hwr.command = "page#" + Date.now()
+}
+)QML";
+
+// Hides the built-in tool while the setting is on; Binding restores xochitl's own binding when it is turned off.
+const char *kHideQml = R"QML(
+import QtQuick
+Binding { property: "visible"; value: false; when: !!hwr.hideNative }
+)QML";
+
+const char *kSidebarQml = R"QML(
+import QtQuick
+import QtQuick.Layouts
+import ark.tokens as ArkTokens
+import ark.controls as ArkControls
+ArkControls.SidebarItem {
+    objectName: "rmppHwrSidebarItem"
+    readonly property int hwrPage: 1001
+    type: ArkTokens.Sidebar.primary
+    text: settingsRoot.showLabels ? "Handwriting" : ""
+    iconSource: "qrc:/ark/icons/hwc"
+    highlighted: settingsRoot._selectedPage === hwrPage
+    focusPolicy: Qt.StrongFocus
+    Layout.fillWidth: true
+    onTriggered: settingsRoot._selectedPage = hwrPage
+}
+)QML";
+
+const char *kPageQml = R"QML(
+import QtQuick
+import QtQuick.Layouts
+import ark.tokens as ArkTokens
+import ark.controls as ArkControls
+Rectangle {
+    id: page
+    readonly property int hwrPage: 1001
+    property string openTime: ""
+    function send(c) { hwr.command = c + "#" + Date.now(); }
+    x: payloadLoaderRef.x
+    y: payloadLoaderRef.y
+    width: payloadLoaderRef.width
+    height: payloadLoaderRef.height
+    z: 10
+    color: "white"
+    visible: settingsRoot._selectedPage === hwrPage
+    onVisibleChanged: if (visible) send("refresh")
+
+    ArkControls.PlaceholderBar {
+        id: placeholder
+        anchors { top: parent.top; left: parent.left; right: parent.right }
+    }
+    Flickable {
+        anchors {
+            top: placeholder.bottom; left: parent.left; right: parent.right; bottom: parent.bottom
+            leftMargin: ArkControls.Values.margin.horizontal.large
+            rightMargin: ArkControls.Values.margin.horizontal.large
+        }
+        contentHeight: column.implicitHeight + ArkControls.Values.margin.vertical.large
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        ColumnLayout {
+            id: column
+            width: parent.width
+            spacing: ArkControls.Values.spacing.large
+
+            ArkControls.Title {
+                type: ArkControls.Title.Large
+                text: "Handwriting settings"
+                Layout.fillWidth: true
+            }
+            ArkControls.Panel {
+                label: "Convert page"
+                description: "Recognizes Korean, English and numbers on the current page and types the text on a new page after it."
+                Layout.fillWidth: true
+            }
+            ArkControls.Panel {
+                label: "Hide built-in Convert to text"
+                description: hwr.hideNative ? "Only Convert page is shown in the toolbar" : "Both Convert to text and Convert page are shown"
+                Layout.fillWidth: true
+                action: ArkControls.Toggle {
+                    checked: !!hwr.hideNative
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -20
+                        onClicked: page.send("set:hideNative:" + (hwr.hideNative ? "0" : "1"))
+                    }
+                }
+            }
+
+            ArkControls.Title {
+                type: ArkControls.Title.Medium
+                text: "Collect training data"
+                Layout.fillWidth: true
+            }
+            ArkControls.Panel {
+                label: "Save conversions: " + (hwr.collect ? "On" : "Off")
+                description: hwr.collect
+                    ? "Each Convert page keeps your handwriting and its text. Fix mistakes on the text page and the fixed text is used to train the model. Stays on this tablet."
+                    : "Nothing is saved. Convert page still works."
+                Layout.fillWidth: true
+                action: ArkControls.Toggle {
+                    checked: !!hwr.collect
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -20
+                        onClicked: page.send("set:collect:" + (hwr.collect ? "0" : "1"))
+                    }
+                }
+            }
+            ArkControls.Panel {
+                label: "Practice notebooks"
+                description: "Notebooks named rmpp-practice have sentences to copy by hand, the fastest way to teach the model your writing. New ones are added from the computer."
+                Layout.fillWidth: true
+            }
+            ArkControls.Panel {
+                id: savedPanel
+                property bool confirm: false
+                label: "Saved conversions: " + (hwr.conversions || 0) + " (" + (hwr.correctedCount || 0) + " corrected)"
+                description: "Each one is a handwritten page and the typed page after it. Fix the typed page, then tap Done correcting (in the Convert menu or here). Only corrected ones are used for training; later edits are picked up too. Deleting keeps the notebook pages."
+                Layout.fillWidth: true
+                action: ArkControls.Button {
+                    visible: (hwr.conversions || 0) > 0
+                    text: savedPanel.confirm ? "Tap again to delete all" : "Delete all"
+                    type: ArkTokens.Button.secondary
+                    onClicked: {
+                        if (savedPanel.confirm) { page.send("delall"); savedPanel.confirm = false; }
+                        else savedPanel.confirm = true;
+                    }
+                }
+            }
+            Repeater {
+                model: { try { return JSON.parse(hwr.items || "[]").slice(0, 30); } catch (e) { return []; } }
+                delegate: ColumnLayout {
+                    id: rec
+                    required property var modelData
+                    readonly property bool open: page.openTime === modelData.time
+                    readonly property var detail: { try { return open ? JSON.parse(hwr.detail || "{}") : {}; } catch (e) { return {}; } }
+                    spacing: ArkControls.Values.spacing.small
+                    Layout.fillWidth: true
+                    Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+
+                    ArkControls.Panel {
+                        label: modelData.name + (modelData.page ? ", page " + modelData.page + (modelData.dpage ? " → " + modelData.dpage : "") : "")
+                        description: (modelData.corrected ? "Corrected, used for training" : "Waiting for your correction")
+                                     + "  ·  " + modelData.when
+                        Layout.fillWidth: true
+                        action: RowLayout {
+                            spacing: ArkControls.Values.spacing.medium
+                            ArkControls.Button {
+                                text: rec.open ? "Close" : "View"
+                                type: ArkTokens.Button.secondary
+                                onClicked: {
+                                    if (rec.open) page.openTime = "";
+                                    else { page.openTime = modelData.time; page.send("show:" + modelData.time); }
+                                }
+                            }
+                            ArkControls.Button {
+                                text: "Delete"
+                                type: ArkTokens.Button.secondary
+                                onClicked: page.send("del:" + modelData.time)
+                            }
+                        }
+                    }
+                    ArkControls.Panel {
+                        visible: rec.open
+                        label: "Recognized"
+                        description: (rec.detail.recognized || []).join("\n")
+                        Layout.fillWidth: true
+                    }
+                    ArkControls.Panel {
+                        visible: rec.open
+                        label: modelData.corrected ? "Your text (saved for training)" : "Text on the page now"
+                        description: (rec.detail.text || []).join("\n") || "(empty)"
+                        Layout.fillWidth: true
+                        action: ArkControls.Button {
+                            text: modelData.corrected ? "Undo" : "Done correcting"
+                            type: ArkTokens.Button.secondary
+                            onClicked: page.send("mark:" + (modelData.corrected ? "0:" : "1:") + modelData.time)
+                        }
+                    }
+                }
+            }
+
+            ArkControls.Title {
+                type: ArkControls.Title.Medium
+                text: "Model"
+                Layout.fillWidth: true
+            }
+            ArkControls.Panel {
+                label: hwr.modelName || ""
+                description: hwr.modelInfo || ""
+                Layout.fillWidth: true
+            }
+        }
+    }
+}
+)QML";
+
+QObject *createInline(QQmlEngine *eng, QQmlContext *ctx, const char *qml, const char *name, QQuickItem *parent,
+                      const QVariantMap &init = {}) {
+    QQmlComponent comp(eng);
+    comp.setData(QByteArray(qml), QUrl(QStringLiteral("qrc:/rmpphwr/%1.qml").arg(QLatin1String(name))));
+    QObject *o = comp.createWithInitialProperties(init, ctx);
+    if (!o) {
+        for (const auto &e : comp.errors()) qWarning("[rmpp-hwr] %s: %s", name, qPrintable(e.toString()));
+        return nullptr;
+    }
+    o->setParent(parent);
+    if (auto *item = qobject_cast<QQuickItem *>(o)) item->setParentItem(parent);
+    return o;
+}
+
+// Settings > Handwriting: a sidebar row below Bluetooth (or Wi-Fi) and the page over the payload area.
+void tryInjectSettings() {
+    QQuickItem *col = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("settingsColumn"); });
+    if (!col || col->property("_rmppHwr").toBool()) return;
+    QQuickItem *settings = col;
+    while (settings && settings->objectName() != QLatin1String("Settings")) settings = settings->parentItem();
+    QQuickItem *loader = settings ? findItem(settings, [](QQuickItem *i) { return i->objectName() == QLatin1String("payloadLoader"); }) : nullptr;
+    QQmlEngine *eng = settings ? qmlEngine(settings) : nullptr;
+    QQmlContext *base = settings ? qmlContext(settings) : nullptr;
+    if (!settings || !loader || !eng || !base) return;
+    col->setProperty("_rmppHwr", true);
+    auto *ctx = new QQmlContext(base, settings);
+    ctx->setContextProperty(QStringLiteral("hwr"), g_state);
+    ctx->setContextProperty(QStringLiteral("settingsRoot"), settings);
+    ctx->setContextProperty(QStringLiteral("payloadLoaderRef"), loader);
+    auto *row = qobject_cast<QQuickItem *>(createInline(eng, ctx, kSidebarQml, "Sidebar", col));
+    if (row) {
+        QQuickItem *after = nullptr;
+        for (QQuickItem *k : col->childItems()) {
+            const QString icon = k->property("iconSource").toString();
+            if (icon.contains(QLatin1String("bluetooth"))) after = k;
+            else if (!after && icon.contains(QLatin1String("wifi"))) after = k;
+        }
+        if (after) row->stackAfter(after);
+    }
+    QObject *page = createInline(eng, ctx, kPageQml, "Page", settings);
+    qWarning("[rmpp-hwr] settings: row=%s page=%s", row ? "ok" : "FAILED", page ? "ok" : "FAILED");
+}
+
+// "Done correcting": shown on a typed page made by Convert page; marks that conversion for training.
+const char *kDoneQml = R"QML(
+import QtQuick
+import xofm.libs.toolbar
+ToolbarTool {
+    objectName: "rmppHwrDoneButton"
+    type: ToolbarTool.Type.FoldoutButton
+    shouldShow: toolbar.notePage && !!hwr.textPage
+    label: hwr.textPageDone ? "Correction saved (undo)" : "Done correcting"
+    iconSource: "qrc:/ark/icons/hwc"
+    onClicked: hwr.command = "mark:" + (hwr.textPageDone ? "0:" : "1:") + hwr.textPage + "#" + Date.now()
+}
+)QML";
+
+void tryInject() {
+    QQuickItem *native =findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("convertToTextButton"); });
+    if (!native || !native->parentItem() || native->property("_rmppHwr").toBool()) return;
+    native->setProperty("_rmppHwr", true);
+    QQmlEngine *eng = qmlEngine(native);
+    QQmlContext *base = qmlContext(native);
+    if (!eng || !base) return;
+    auto *ctx = new QQmlContext(base, native->parentItem());
+    ctx->setContextProperty(QStringLiteral("hwr"), g_state);
+    QQmlComponent comp(eng);
+    comp.setData(QByteArray(kButtonQml), QUrl(QStringLiteral("qrc:/rmpphwr/Button.qml")));
+    QVariantMap init{{QStringLiteral("toolbar"), native->property("toolbar")}};
+    QObject *o = comp.createWithInitialProperties(init, ctx);
+    auto *item = qobject_cast<QQuickItem *>(o);
+    if (!item) {
+        for (const auto &e : comp.errors()) qWarning("[rmpp-hwr] %s", qPrintable(e.toString()));
+        delete o;
+        return;
+    }
+    // The tool may sit in single-child wrappers (loaders); insert next to the outermost wrapper,
+    // in the first container that lays out several tools.
+    QQuickItem *anchor = native, *box = native->parentItem();
+    while (box && box->childItems().size() == 1 && box->parentItem()) { anchor = box; box = box->parentItem(); }
+    QString chain;
+    for (QQuickItem *p = native; p && chain.count(QLatin1Char('<')) < 6; p = p->parentItem())
+        chain += QString::fromLatin1(p->metaObject()->className()) + "(" + QString::number(p->childItems().size()) + ") < ";
+    qWarning("[rmpp-hwr] tool chain: %s", qPrintable(chain));
+    item->setParentItem(box);
+    item->setParent(box);
+    item->stackAfter(anchor);
+    if (auto *done = qobject_cast<QQuickItem *>(createInline(eng, ctx, kDoneQml, "Done", box, init))) done->stackAfter(item);
+    createInline(eng, ctx, kHideQml, "HideNative", item, {{QStringLiteral("target"), QVariant::fromValue<QObject *>(anchor)}});
+    qWarning("[rmpp-hwr] button added in %s", box->metaObject()->className());
+}
+
+void hwrInit() {
+    auto *app = QCoreApplication::instance();
+    g_state = new QQmlPropertyMap(app);
+    g_state->insert(QStringLiteral("busy"), false);
+    g_state->insert(QStringLiteral("status"), QString());
+    g_state->insert(QStringLiteral("command"), QString());
+    g_state->insert(QStringLiteral("hideNative"), false);
+    g_state->insert(QStringLiteral("collect"), true);
+    QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
+        if (key != QLatin1String("command")) return;
+        const QString cmd = v.toString().section(QLatin1Char('#'), 0, 0);
+        if (cmd == QLatin1String("page")) convertCurrentPage();
+        else if (cmd == QLatin1String("refresh")) refreshInfo();
+        else if (cmd == QLatin1String("delall")) deleteConversions(QString());
+        else if (cmd.startsWith(QLatin1String("del:"))) deleteConversions(cmd.mid(4));
+        else if (cmd.startsWith(QLatin1String("show:"))) showRecord(cmd.mid(5));
+        else if (cmd.startsWith(QLatin1String("mark:"))) {
+            markRecord(cmd.mid(7), cmd.mid(5, 1) == QLatin1String("1"));
+            updateCurrentPage();
+        }
+        else if (cmd.startsWith(QLatin1String("set:"))) {
+            const QString name = cmd.section(QLatin1Char(':'), 1, 1);
+            if (name == QLatin1String("hideNative") || name == QLatin1String("collect"))
+                saveSetting(name, cmd.section(QLatin1Char(':'), 2, 2) == QLatin1String("1"));
+        }
+    });
+    auto *t = new QTimer(app);
+    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); updateCurrentPage(); });
+    t->start(1500);
+    qWarning("[rmpp-hwr] loaded");
+}
+
+} // namespace
+
+Q_COREAPP_STARTUP_FUNCTION(hwrInit)

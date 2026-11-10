@@ -1,0 +1,41 @@
+diff --git a/ppocr/modeling/backbones/rec_lcnetv3.py b/ppocr/modeling/backbones/rec_lcnetv3.py
+index 387c761..8ae0432 100644
+--- a/ppocr/modeling/backbones/rec_lcnetv3.py
++++ b/ppocr/modeling/backbones/rec_lcnetv3.py
+@@ -16,7 +16,8 @@ from __future__ import absolute_import
+ from __future__ import division
+ from __future__ import print_function
+ 
+-import paddle
++import paddle, os
++_FBN = os.environ.get("FREEZE_BN") == "1"
+ import paddle.nn as nn
+ import paddle.nn.functional as F
+ from paddle import ParamAttr
+@@ -131,6 +132,7 @@ class ConvBNLayer(nn.Layer):
+             out_channels,
+             weight_attr=ParamAttr(regularizer=L2Decay(0.0), learning_rate=lr_mult),
+             bias_attr=ParamAttr(regularizer=L2Decay(0.0), learning_rate=lr_mult),
++            use_global_stats=_FBN,
+         )
+ 
+     def forward(self, x):
+@@ -177,6 +179,7 @@ class LearnableRepLayer(nn.Layer):
+ 
+         self.identity = (
+             BatchNorm2D(
++                use_global_stats=_FBN,
+                 num_features=in_channels,
+                 weight_attr=ParamAttr(learning_rate=lr_mult),
+                 bias_attr=ParamAttr(learning_rate=lr_mult),
+@@ -560,7 +563,9 @@ class PPLCNetV3(nn.Layer):
+             out_list[3] = self.layer_list[3](out_list[3])
+             return out_list
+ 
+-        if self.training:
++        # rmpp-hwr: HWR_EVAL_POOL=1 trains with the inference pooling (width/8 time steps). Upstream squeezes every
++        # training image to 40 steps, which only matches inference at width 320 and breaks wider training images.
++        if self.training and os.environ.get("HWR_EVAL_POOL") != "1":
+             x = F.adaptive_avg_pool2d(x, [1, 40])
+         else:
+             x = F.avg_pool2d(x, [3, 2])

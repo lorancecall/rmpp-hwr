@@ -1,0 +1,6 @@
+.env
+target/
+build/
+__pycache__/
+*.pyc
+collect/fonts/

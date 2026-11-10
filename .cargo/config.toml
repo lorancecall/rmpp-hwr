@@ -1,0 +1,8 @@
+# Cross-compiling for the tablet with the Arm GNU toolchain in ../sdk (next to this repo).
+# Paths are relative to the directory that contains .cargo/. On Linux/macOS drop the .exe suffixes.
+[target.aarch64-unknown-linux-gnu]
+linker = "../sdk/bin/aarch64-none-linux-gnu-gcc.exe"
+
+[env]
+CC_aarch64_unknown_linux_gnu = { value = "../sdk/bin/aarch64-none-linux-gnu-gcc.exe", relative = true }
+AR_aarch64_unknown_linux_gnu = { value = "../sdk/bin/aarch64-none-linux-gnu-ar.exe", relative = true }

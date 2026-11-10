@@ -1,0 +1,33 @@
+[package]
+name = "rmpp-hwr"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "On-device handwriting recognition (Korean, English, digits) for reMarkable Paper Pro"
+
+[lib]
+name = "rmpp_hwr"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "rmpp-hwr"
+path = "src/main.rs"
+
+[features]
+default = ["ort-backend"]
+# onnxruntime, loaded at run time (libonnxruntime.so next to the model); uses all 4 cores
+ort-backend = ["dep:ort"]
+# pure-Rust tract: no extra library, single core, about 4x slower on the tablet
+tract-backend = ["dep:tract-onnx"]
+
+[dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std"], optional = true }
+tract-onnx = { version = "0.21", optional = true }
+png = "0.17"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,12 @@
+# Python packages for train/scripts (PaddlePaddle itself is installed per machine: GPU build matching CUDA).
+numpy
+opencv-python-headless
+pillow
+fonttools
+scikit-image
+pandas
+pyarrow
+pyyaml
+onnx
+onnxruntime
+paddle2onnx

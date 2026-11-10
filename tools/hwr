@@ -1,0 +1,4 @@
+#!/bin/sh
+D=$(cd "$(dirname "$0")" && pwd)
+PY="$D/../../.venv/Scripts/python.exe"; [ -x "$PY" ] || PY="$D/../../.venv/bin/python"
+exec "$PY" "$D/hwr.py" "$@"

@@ -1,0 +1,19 @@
+rmpp-hwr includes or downloads the following third-party components.
+
+model/rec.onnx, model/dict.txt
+  PaddleOCR korean_PP-OCRv5_mobile_rec, converted to ONNX (input/output dimensions renamed).
+  Copyright PaddlePaddle Authors. Apache License 2.0. https://github.com/PaddlePaddle/PaddleOCR
+
+train/patches/paddleocr-rmpp.patch
+  A patch to PaddleOCR (Apache License 2.0), applied to a local checkout at training time.
+
+onnxruntime (loaded at run time, not included)
+  Copyright Microsoft Corporation. MIT License. https://github.com/microsoft/onnxruntime
+
+Noto Sans KR (downloaded at run time for practice PDFs, not included)
+  SIL Open Font License 1.1. https://github.com/google/fonts
+
+Training data used by train/ (not included; each user obtains it):
+  jbaudanza/korean-handwriting-strokes (Hugging Face), CC BY-SA 4.0.
+  IAM On-Line Handwriting Database (optional), non-commercial research use only; cite
+  M. Liwicki and H. Bunke, ICDAR 2005. Models trained with it are not distributed by this project.

@@ -1,0 +1,5 @@
+rmscene>=0.7
+pillow
+numpy
+reportlab
+fonttools
