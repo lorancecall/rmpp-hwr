@@ -60,6 +60,21 @@ dereferences unknown pointers directly.
 rmscene can write v6 scene files, but xochitl keeps the open page in memory and writes it back, so edits to an open
 page's file are lost or conflict, and there is no reload slot for one page. Only usable for a closed document.
 
+### Edit text (built 2026-11-10, deployed, NOT yet tested on the tablet)
+
+- Every conversion is recorded in `/home/root/.local/share/rmpp-hwr/ink.json`: page id, text (lines joined with
+  `
+`), stroke count `n`, selection size `w`/`h` (measured from the selection right after the new ink is selected),
+  em origin offset `ox`/`oy` from the selection's top-left, `em` size. Max 500 records.
+- Lasso menu button: if the selection on this page has the same stroke count and size (+-3) as a record, it is our ink
+  (wherever it was moved) and the button opens an edit box instead of converting.
+- Edit box (QML over the window, top of the screen): multi-line `TextEdit` in a `Flickable`, Enter = new line, wraps,
+  scrolls; xochitl's on-screen keyboard (with the rmpp-korean layout) comes up for it (tested with exp12: Korean typing
+  works). OK: delete the selection, lay the text out at the recorded em size from the current position, word-wrapped at
+  the original ink width (min 8 em), select the new ink, replace the record. Empty text deletes the ink.
+- Icon: xochitl's own `hwc` ("aa") icon inside a dashed box, composed at run time from `:/ark/icons/hwc` into
+  `ink_convert.svg` (no reMarkable artwork in this repo).
+
 ### Editable text instead of strokes?
 
 OS 3.29 typed text is one root text flow per page (`createRootDocument`, `rootDocument*`); there is no floating text
@@ -110,6 +125,6 @@ Plan:
 1. Ship `rmpp_hwr_region` in the released `librmpp_hwr.so` and drop the `_ink` copy.
 2. Handwriting-style fallback font; regenerate `glyphs.json` on `hwr pull` so new practice cells become glyphs.
 3. Settings > Handwriting: lasso convert = ink / text (native); place below / replace.
-4. "Edit text" for converted ink (see above); group the strokes so one undo removes the whole conversion.
+4. Test and polish "edit text" (see above); group the strokes so one undo removes the whole conversion.
 5. Read strokes from the live scene instead of the saved file (selected items), so very recent writing is included.
 6. Remove the developer loader and `ui/exp` from release builds.

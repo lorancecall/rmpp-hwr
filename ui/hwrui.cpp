@@ -276,8 +276,6 @@ void setStatus(const QString &s, bool busy) {
     if (!s.isEmpty()) qWarning("[rmpp-hwr] %s", qPrintable(s));
 }
 
-#include "ink.h"
-
 // ---- typing the result on the new page ----
 void typeText(const QStringList &lines) {
     QObject *focus = QGuiApplication::focusObject();
@@ -613,6 +611,8 @@ QObject *createInline(QQmlEngine *eng, QQmlContext *ctx, const char *qml, const 
     return o;
 }
 
+#include "ink.h"
+
 // Settings > Handwriting: a sidebar row below Bluetooth (or Wi-Fi) and the page over the payload area.
 void tryInjectSettings() {
     QQuickItem *col = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("settingsColumn"); });
@@ -778,6 +778,34 @@ MouseArea {
 }
 )QML";
 
+// The lasso menu icon: xochitl's own convert icon ("aa") inside a dashed selection box, composed at run time from
+// the icon in xochitl's resources (so no reMarkable artwork is shipped here).
+QString inkIconUrl() {
+    static QString url;
+    if (!url.isEmpty()) return url;
+    QFile in(QStringLiteral(":/ark/icons/hwc"));
+    const QString out = QLatin1String(kLibDir) + QStringLiteral("/ink_convert.svg");
+    QString svg;
+    if (in.open(QIODevice::ReadOnly)) {
+        const QString src = QString::fromUtf8(in.readAll());
+        const int a = src.indexOf(QLatin1Char('>'), src.indexOf(QLatin1String("<svg"))) + 1;
+        const int b = src.lastIndexOf(QLatin1String("</svg>"));
+        if (a > 0 && b > a)
+            svg = QStringLiteral("<svg width=\"48\" height=\"48\" viewBox=\"0 0 48 48\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">"
+                                 "<rect x=\"2\" y=\"4\" width=\"44\" height=\"40\" stroke=\"black\" stroke-width=\"2.5\" "
+                                 "stroke-dasharray=\"5 3.5\" fill=\"none\"/><g transform=\"translate(8.5 7.5) scale(0.64)\">")
+                  + src.mid(a, b - a) + QStringLiteral("</g></svg>");
+    }
+    QFile f(out);
+    if (!svg.isEmpty() && f.open(QIODevice::WriteOnly) && f.write(svg.toUtf8()) > 0) {
+        f.close();
+        url = QUrl::fromLocalFile(out).toString();
+    } else {
+        url = QStringLiteral("qrc:/ark/icons/ballpoint_tip");
+    }
+    return url;
+}
+
 void tryInjectInkMenu() {
     QQuickItem *menu = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionHandlerMenu"); });
     if (!menu) return;
@@ -792,7 +820,7 @@ void tryInjectInkMenu() {
     auto *ctx = new QQmlContext(base, btn);
     ctx->setContextProperty(QStringLiteral("hwr"), g_state);
     QObject *area = createInline(eng, ctx, kInkMenuQml, "InkMenu", btn);
-    btn->setProperty("iconSource", QStringLiteral("qrc:/ark/icons/ballpoint_tip"));
+    btn->setProperty("iconSource", inkIconUrl());
     qWarning("[rmpp-hwr] lasso menu: convert button -> ink %s", area ? "ok" : "FAILED");
 }
 
@@ -834,12 +862,15 @@ void hwrInit() {
     g_state->insert(QStringLiteral("command"), QString());
     g_state->insert(QStringLiteral("hideNative"), false);
     g_state->insert(QStringLiteral("collect"), true);
+    g_state->insert(QStringLiteral("inkText"), QString());
     QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
         if (key != QLatin1String("command")) return;
         const QString cmd = v.toString().section(QLatin1Char('#'), 0, 0);
         if (cmd == QLatin1String("page")) convertCurrentPage();
         else if (cmd == QLatin1String("ink")) convertSelectionToInk(false);
         else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
+        else if (cmd == QLatin1String("inkok")) finishInkEdit(true);
+        else if (cmd == QLatin1String("inkcancel")) finishInkEdit(false);
         else if (cmd == QLatin1String("refresh")) refreshInfo();
         else if (cmd == QLatin1String("delall")) deleteConversions(QString());
         else if (cmd.startsWith(QLatin1String("del:"))) deleteConversions(cmd.mid(4));
