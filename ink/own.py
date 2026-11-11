@@ -102,12 +102,13 @@ def normalize(strokes, ref):
 
 # ---------------------------------------------------------------- 3. jamo composition
 def split_final(g):
-    """(upper strokes, final strokes): the final consonant is the strokes whose centre is in the lower part."""
+    """(upper strokes, final strokes): the final consonant is the strokes that start in the lower part. A stroke
+    that starts high and runs down (the long ㅣ of ㅏ, ㅓ, ㅣ...) belongs to the vowel even when its centre is low."""
     st = [np.array(s, dtype=float).reshape(-1, 2) for s in g["strokes"]]
     allp = np.vstack(st)
     y0, y1 = allp[:, 1].min(), allp[:, 1].max()
-    mid = y0 + (y1 - y0) * 0.58
-    return [s for s in st if s[:, 1].mean() < mid], [s for s in st if s[:, 1].mean() >= mid]
+    cut = y0 + (y1 - y0) * 0.55
+    return [s for s in st if s[:, 1].min() < cut], [s for s in st if s[:, 1].min() >= cut]
 
 
 def compose(target, own, font):
@@ -129,11 +130,24 @@ def compose(target, own, font):
     if not finals:
         return None
     withf = [c for c in bases if jamo(c)[2] != 0]
-    if not withf:
-        return None   # placing a final under a syllable written without one needs more than this
-    top, old = split_final(own[withf[0]])
     _, fin = split_final(own[finals[0]])
-    if not top or not old or not fin:
+    if not fin:
+        return None
+    if not withf:
+        # only written without a final (스 for 습): squeeze it into the upper 62% and put the final below,
+        # as wide as the vowel part and as tall as the finals in the writer's own syllables
+        st = [np.array(x, dtype=float).reshape(-1, 2) for x in own[bases[0]]["strokes"]]
+        bp = np.vstack(st)
+        y0, h = bp[:, 1].min(), np.ptp(bp[:, 1]) or 1e-3
+        top = [np.column_stack([x[:, 0], y0 + (x[:, 1] - y0) * 0.62]) for x in st]
+        fp = np.vstack(fin)
+        k = min(h * 0.36 / (np.ptp(fp[:, 1]) or 1e-3), np.ptp(bp[:, 0]) * 0.8 / (np.ptp(fp[:, 0]) or 1e-3))
+        c_f = (fp.min(0) + fp.max(0)) / 2
+        target = np.array([(bp[:, 0].min() + bp[:, 0].max()) / 2, y0 + h * 0.62 + h * 0.2])
+        strokes = top + [(x - c_f) * k + target for x in fin]
+        return {"adv": own[bases[0]]["adv"], "src": "jamo", "strokes": [x.reshape(-1).tolist() for x in strokes]}
+    top, old = split_final(own[withf[0]])
+    if not top or not old:
         return None
     op, fp = np.vstack(old), np.vstack(fin)
     k = (np.ptp(op[:, 1]) or 1e-3) / (np.ptp(fp[:, 1]) or 1e-3)
@@ -197,10 +211,39 @@ def cmd_build(a):
     n_cell = len(own)
     lines = line_chars(a.data)
     cands = [(c, s) for c, samples in lines.items() if c not in own and c in fg for s in samples]
+
+    def aspect(strokes):
+        p = np.vstack([np.asarray(x, dtype=float).reshape(-1, 2) for x in strokes])
+        return np.ptp(p[:, 0]) / max(np.ptp(p[:, 1]), 1e-3)
+
+    # a cut-out with a stroke of its neighbour is too wide for its character (ㅣ갑): compare with the font's shape
+    cands = [(c, s) for c, s in cands
+             if not fg[c]["strokes"] or 0.5 <= aspect(s) / max(aspect(fg[c]["strokes"]), 0.05) <= 1.45]
     if a.rec:   # keep only cut-outs the recognizer reads as their label (a word whose blobs matched by count only)
         ok = verify(cands, a.rec, a.model)
         print(f"line cut-outs: {sum(ok)} of {len(cands)} read back as their label", file=sys.stderr)
         cands = [x for x, k in zip(cands, ok) if k]
+        # a stroke of the neighbouring syllable can ride along (ㅣ갑): drop the leftmost / rightmost stroke of a
+        # Hangul cut-out while the rest is still read as the same syllable
+        for _ in range(2):
+            trials, where = [], []
+            for n, (c, s) in enumerate(cands):
+                if jamo(c) and len(s) >= 3:
+                    xs = [np.asarray(x)[:, 0].mean() for x in s]
+                    for drop in (int(np.argmin(xs)), int(np.argmax(xs))):
+                        trials.append((c, [x for i, x in enumerate(s) if i != drop]))
+                        where.append(n)
+            if not trials:
+                break
+            ok = verify(trials, a.rec, a.model)
+            trimmed = set()
+            for (c, s), n, k in zip(trials, where, ok):
+                if k and n not in trimmed:
+                    cands[n] = (c, s)
+                    trimmed.add(n)
+            print(f"trimmed a neighbour's stroke from {len(trimmed)} cut-outs", file=sys.stderr)
+            if not trimmed:
+                break
     by_char = defaultdict(list)
     for c, s in cands:
         by_char[c].append(s)
