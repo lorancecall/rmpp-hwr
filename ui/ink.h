@@ -95,7 +95,7 @@ QList<InkPt> inkPoints(const QList<QPointF> &xy, quint16 width) {
 
 // Add strokes (page coordinates) with the current pen. Returns the number added, -1 if Line is not as expected.
 // Converted text is drawn like a font: Fineliner (even width), black, thickness from the text size (em, page units).
-int addInkStrokes(QObject *sc, QObject *ph, const QList<QList<QPointF>> &strokes, double em) {
+int addInkStrokes(QObject *sc, QObject *ph, const QList<QList<QPointF>> &strokes, double em, int weight = 1) {
     Q_UNUSED(ph);
     const int add = sc->metaObject()->indexOfMethod("addDrawingLine(Line)");
     const QMetaType type = add >= 0 ? sc->metaObject()->method(add).parameterMetaType(0) : QMetaType();
@@ -103,7 +103,8 @@ int addInkStrokes(QObject *sc, QObject *ph, const QList<QList<QPointF>> &strokes
     const int tool = 17;   // Finelinerv2
     const int color = 0;   // black
     const uint argb = 0xff000000u;
-    const double thick = qBound(2.0, em / 20.0, 6.0);
+    static const double divisor[] = {32.0, 20.0, 13.0};   // thin, medium, thick
+    const double thick = qBound(1.5, em / divisor[qBound(0, weight, 2)], 9.0);
     for (const auto &s : strokes) {
         void *line = type.create();
         auto *b = static_cast<char *>(line);
@@ -240,6 +241,7 @@ struct Placed {
     QList<QList<QPointF>> strokes;
     QPointF origin;   // top-left of the first line's em box
     double em = 0;    // em height of the first line
+    int weight = 1;   // 0 thin, 1 medium, 2 thick
 };
 
 void appendLine(Placed *out, const QString &text, const QPointF &origin, double h) {
@@ -394,7 +396,7 @@ void recordInk(QPointer<QObject> scp, const QString &page, const QString &text, 
         recs.append(QJsonObject{{QStringLiteral("page"), page}, {QStringLiteral("text"), text},
                                 {QStringLiteral("n"), n}, {QStringLiteral("w"), r.width()}, {QStringLiteral("h"), r.height()},
                                 {QStringLiteral("ox"), pl.origin.x() - r.left()}, {QStringLiteral("oy"), pl.origin.y() - r.top()},
-                                {QStringLiteral("em"), pl.em}});
+                                {QStringLiteral("em"), pl.em}, {QStringLiteral("weight"), pl.weight}});
         while (recs.size() > 500) recs.removeAt(0);
         writeInkRecords(recs);
     });
@@ -408,7 +410,7 @@ void putInk(QPointer<QObject> scp, QPointer<QObject> php, QPointer<QQuickItem> d
     else QMetaObject::invokeMethod(scp, "clearSelectedItems");
     QTimer::singleShot(400, scp, [=] {
         if (!scp || !php) { setStatus(QStringLiteral("page closed"), false); return; }
-        const int added = addInkStrokes(scp, php, pl.strokes, pl.em);
+        const int added = addInkStrokes(scp, php, pl.strokes, pl.em, pl.weight);
         if (added > 0) {
             selectInk(scp, pl.strokes);
             recordInk(scp, dvp ? dvp->property("currentPageId").toString() : scp->property("pageId").toString(), text, pl, added, replaceIdx);
@@ -431,6 +433,13 @@ Item {
     id: shade
     property string initial: ""
     property var penManager: null
+    property int weight: 1        // 0 thin, 1 medium, 2 thick
+    property int sizePct: 100     // size of the ink, relative to now
+    property int rev: 0           // bumps the preview image
+    function refresh() { hwr.inkText = input.text; hwr.inkWeight = weight; hwr.inkSize = sizePct; rev++; }
+    onWeightChanged: refresh()
+    onSizePctChanged: refresh()
+    Timer { id: typing; interval: 300; onTriggered: shade.refresh() }
     anchors.fill: parent
     z: 10000
     // outside the box: the pen draws nothing on the page, and a tap closes the box (cancel)
@@ -445,7 +454,7 @@ Rectangle {
     Text { x: 36; y: 26; text: "Edit text"; font.pixelSize: 36; font.bold: true }
     Rectangle {
         id: field
-        x: 36; y: 86; width: parent.width - 72; height: 520
+        x: 36; y: 86; width: parent.width - 72; height: 260
         border.color: "black"; border.width: 2
         Flickable {
             id: flick
@@ -466,16 +475,52 @@ Rectangle {
                 text: shade.initial
                 focus: true
                 onCursorRectangleChanged: flick.ensureVisible(cursorRectangle)
-                Component.onCompleted: { forceActiveFocus(); cursorPosition = text.length; Qt.inputMethod.show(); }
+                onTextChanged: typing.restart()
+                Component.onCompleted: { forceActiveFocus(); cursorPosition = text.length; Qt.inputMethod.show(); shade.refresh(); }
             }
         }
+    }
+    Text { x: 36; y: 360; text: "Preview"; font.pixelSize: 26; color: "#555555" }
+    Rectangle {
+        x: 36; y: 400; width: parent.width - 72; height: 220
+        border.color: "#999999"; border.width: 1
+        clip: true
+        Image {
+            x: 1; y: 1; width: parent.width - 2; height: parent.height - 2
+            fillMode: Image.Pad
+            horizontalAlignment: Image.AlignLeft; verticalAlignment: Image.AlignTop
+            cache: false
+            sourceSize: Qt.size(width, height)
+            source: "image://rmpphwr/preview/" + shade.rev
+        }
+    }
+    Row {
+        x: 36; y: 636; spacing: 12
+        Repeater {
+            model: ["Thin", "Medium", "Thick"]
+            delegate: ArkControls.Button {
+                required property string modelData
+                required property int index
+                text: modelData
+                type: shade.weight === index ? ArkTokens.Button.primary : ArkTokens.Button.secondary
+                onClicked: shade.weight = index
+            }
+        }
+        Item { width: 24; height: 1 }
+        ArkControls.Button { text: "−"; type: ArkTokens.Button.secondary; onClicked: shade.sizePct = Math.max(50, shade.sizePct - 10) }
+        Text { text: shade.sizePct + "%"; font.pixelSize: 32; width: 100; horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
+        ArkControls.Button { text: "+"; type: ArkTokens.Button.secondary; onClicked: shade.sizePct = Math.min(200, shade.sizePct + 10) }
     }
     Row {
         x: parent.width - width - 36; y: 636; spacing: 24
         ArkControls.Button { text: "Cancel"; type: ArkTokens.Button.secondary; onClicked: hwr.command = "inkcancel#" + Date.now() }
         ArkControls.Button {
             text: "OK"
-            onClicked: { Qt.inputMethod.commit(); hwr.inkText = input.text; hwr.command = "inkok#" + Date.now(); }
+            onClicked: {
+                Qt.inputMethod.commit();
+                hwr.inkText = input.text; hwr.inkWeight = shade.weight; hwr.inkSize = shade.sizePct;
+                hwr.command = "inkok#" + Date.now();
+            }
         }
     }
 }
@@ -488,8 +533,36 @@ struct InkEdit {
     QString page;
     int rec = -1;
     int layer = 0;
+    double em = 60, maxW = 600;   // of the ink when the box opened (page units)
 };
 InkEdit g_edit;
+
+// The edit box's preview: the text as it will be drawn (glyphs, weight, size, wrap), at page scale, black on white.
+class InkPreviewProvider : public QQuickImageProvider {
+public:
+    InkPreviewProvider() : QQuickImageProvider(QQuickImageProvider::Image) {}
+    QImage requestImage(const QString &, QSize *size, const QSize &req) override {
+        const QSize sz(req.width() > 0 ? req.width() : 1400, req.height() > 0 ? req.height() : 220);
+        QImage img(sz, QImage::Format_ARGB32);
+        img.fill(Qt::white);
+        if (size) *size = sz;
+        if (!loadGlyphs()) return img;
+        const double scale = qBound(50, g_state->value(QStringLiteral("inkSize")).toInt(), 200) / 100.0;
+        const int weight = qBound(0, g_state->value(QStringLiteral("inkWeight")).toInt(), 2);
+        const double em = g_edit.em * scale;
+        const Placed pl = placeText(g_state->value(QStringLiteral("inkText")).toString().trimmed(), QPointF(12, 8), em,
+                                    g_edit.maxW * scale);
+        static const double divisor[] = {32.0, 20.0, 13.0};
+        QPainter p(&img);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(QPen(Qt::black, qBound(1.5, em / divisor[weight], 9.0), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        for (const auto &st : pl.strokes) {
+            if (st.size() == 1) p.drawPoint(st[0]);
+            else p.drawPolyline(st.constData(), int(st.size()));
+        }
+        return img;
+    }
+};
 
 void closeInkEdit() {
     if (g_edit.box) g_edit.box->deleteLater();
@@ -497,7 +570,7 @@ void closeInkEdit() {
     if (QGuiApplication::inputMethod()) QGuiApplication::inputMethod()->hide();
 }
 
-void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, const QString &text) {
+void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, const QString &text, int weight) {
     closeInkEdit();
     QQmlEngine *eng = qmlEngine(dv);
     QQmlContext *base = qmlContext(dv);
@@ -507,11 +580,20 @@ void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, c
     // a child of the DocumentView: hidden and destroyed with the notebook (see also closeStaleInkEdit)
     QObject *pin = dv->property("penInput").value<QObject *>();   // xochitl's pen input; its surface manager blocks the pen
     QObject *mgr = pin ? pin->property("surfaceManager").value<QObject *>() : nullptr;
+    if (!eng->imageProvider(QStringLiteral("rmpphwr"))) eng->addImageProvider(QStringLiteral("rmpphwr"), new InkPreviewProvider);
+    // size of the ink now (it may have been scaled since it was made), for the preview
+    const QJsonArray recs = readInkRecords();
+    const QJsonObject r = rec >= 0 && rec < recs.size() ? recs[rec].toObject() : QJsonObject();
+    const QRectF sel = selectionRect(sc, layer);
+    const double k = sel.isEmpty() ? 1.0 : sel.width() / qMax(1.0, r.value(QStringLiteral("w")).toDouble(sel.width()));
+    const double em = r.value(QStringLiteral("em")).toDouble(60) * k;
+    const double maxW = qMax(sel.width() - r.value(QStringLiteral("ox")).toDouble() * k, em * 8);
     QObject *o = createInline(eng, ctx, kEditQml, "InkEdit", dv,
-                              {{QStringLiteral("initial"), text}, {QStringLiteral("penManager"), QVariant::fromValue(mgr)}});
+                              {{QStringLiteral("initial"), text}, {QStringLiteral("penManager"), QVariant::fromValue(mgr)},
+                               {QStringLiteral("weight"), weight}});
     if (!o) { delete ctx; return; }
     ctx->setParent(o);
-    g_edit = {o, sc, ph, dv, dv->property("currentPageId").toString(), rec, layer};
+    g_edit = {o, sc, ph, dv, dv->property("currentPageId").toString(), rec, layer, em, maxW};
 }
 
 // Called from the 1.5 s timer: the notebook was closed or the page turned while the edit box was open.
@@ -529,7 +611,11 @@ void finishInkEdit(bool ok) {
     const QJsonArray recs = readInkRecords();
     if (e.rec < 0 || e.rec >= recs.size()) return;
     const QJsonObject r = recs[e.rec].toObject();
-    if (text == r.value(QStringLiteral("text")).toString()) return;
+    const int weight = qBound(0, g_state->value(QStringLiteral("inkWeight")).toInt(), 2);
+    const double size = qBound(50, g_state->value(QStringLiteral("inkSize")).toInt(), 200) / 100.0;
+    if (text == r.value(QStringLiteral("text")).toString() && weight == r.value(QStringLiteral("weight")).toInt(1)
+        && qFuzzyCompare(size, 1.0))
+        return;   // nothing changed
     // where the ink is now (it may have been moved since it was made)
     const QRectF sel = selectionRect(e.sc, e.layer);
     if (sel.isEmpty()) { setStatus(QStringLiteral("selection lost, select the ink again"), false); return; }
@@ -537,9 +623,10 @@ void finishInkEdit(bool ok) {
     const double k = sel.width() / qMax(1.0, r.value(QStringLiteral("w")).toDouble());
     const QPointF origin = sel.topLeft() + QPointF(r.value(QStringLiteral("ox")).toDouble(), r.value(QStringLiteral("oy")).toDouble()) * k;
     // wrap at the width of the ink being edited (at least 8 em), so longer text grows downwards
-    const double em = r.value(QStringLiteral("em")).toDouble() * k;
-    const double maxW = qMax(sel.width() - r.value(QStringLiteral("ox")).toDouble() * k, em * 8);
-    const Placed pl = placeText(text, origin, em, maxW);
+    const double em = r.value(QStringLiteral("em")).toDouble() * k * size;
+    const double maxW = qMax((sel.width() - r.value(QStringLiteral("ox")).toDouble() * k) * size, em * 8);
+    Placed pl = placeText(text, origin, em, maxW);
+    pl.weight = weight;
     if (text.isEmpty()) {   // empty text: just delete the ink
         QMetaObject::invokeMethod(e.sc, "deleteSelectedItems", Q_ARG(int, e.layer));
         return;
@@ -585,7 +672,8 @@ void convertSelectionToInk(bool replace, bool editOnly = false) {
     const QJsonArray recs = readInkRecords();
     const int rec = findInkRecord(recs, pageId, sc->property("selectionItemCount").toInt(), sel);
     if (rec >= 0) {
-        openInkEdit(dv, sc, ph, layer, rec, recs[rec].toObject().value(QStringLiteral("text")).toString());
+        openInkEdit(dv, sc, ph, layer, rec, recs[rec].toObject().value(QStringLiteral("text")).toString(),
+                    recs[rec].toObject().value(QStringLiteral("weight")).toInt(1));
         return;
     }
     if (editOnly) {

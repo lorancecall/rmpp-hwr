@@ -35,6 +35,8 @@
 #include <QtQml/QQmlContext>
 #include <QtQml/QQmlEngine>
 #include <QtQml/QQmlPropertyMap>
+#include <QtGui/QPainter>
+#include <QtQuick/QQuickImageProvider>
 #include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickWindow>
 
@@ -1027,6 +1029,8 @@ void hwrInit() {
     g_state->insert(QStringLiteral("hasOwnGlyphs"), false);
     g_state->insert(QStringLiteral("collect"), true);
     g_state->insert(QStringLiteral("inkText"), QString());
+    g_state->insert(QStringLiteral("inkWeight"), 1);
+    g_state->insert(QStringLiteral("inkSize"), 100);
     QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
         if (key != QLatin1String("command")) return;
         const QString cmd = v.toString().section(QLatin1Char('#'), 0, 0);
