@@ -712,7 +712,7 @@ void putText(QPointer<QObject> scp, int layer, bool replace, const QList<QPair<d
         QString insert;
         if (len > 0 && y < root.bottom()) {
             QMetaObject::invokeMethod(scp, "setCursorPosition", Q_ARG(QPointF, QPointF(root.right() - 1, y)));
-            insert = QLatin1Char(' ') + lines.first().second;
+            insert = (len > 1 ? QStringLiteral(" ") : QString()) + lines.first().second;   // no space on an empty line
         } else {
             const int used = len > 0 ? qMax(1, qRound(root.height() / kTextLinePitch)) : 0;   // lines in use
             const int target = lineOf(y);                                                        // line of the handwriting
