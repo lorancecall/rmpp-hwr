@@ -306,6 +306,7 @@ def clean(lines):
 # ---------------------------------------------------------------- tablet access (read-only: ssh cat/grep)
 XO = "/home/root/.local/share/remarkable/xochitl"
 JSONL = "/home/root/.local/share/rmpp-hwr/conversions.jsonl"
+REG = "/home/root/.local/share/rmpp-hwr/practice"   # practice sidecars on the tablet, <doc_id>.json (the registry)
 
 
 class Tablet:
@@ -427,15 +428,35 @@ def pull_conversion(tab, c, out):
     return "corrected" if meta["pairs"] else ("waiting for your correction" if not meta["confirmed"] else "needs review")
 
 
-def load_sidecars(out, extra):
+def load_sidecars(out, extra, tab=None):
+    """Sidecars from --sidecar files and from the tablet's registry (notebooks made on the tablet or uploaded by
+    `hwr practice`), kept in OUT/practice."""
     pd = out / "practice"
     pd.mkdir(exist_ok=True)
     for f in extra or []:
         shutil.copy(f, pd / Path(f).name)
-    return [json.loads(f.read_text(encoding="utf-8")) for f in sorted(pd.glob("*.json"))]
+    names = (tab.run(f"ls {REG}/*.json 2>/dev/null; true") or b"").decode().split() if tab else []
+    for path in names:
+        try:
+            side = json.loads(tab.cat(path) or b"")
+        except ValueError:
+            continue
+        if side.get("doc_id"):
+            (pd / f"tablet_{side['doc_id']}.json").write_text(json.dumps(side, ensure_ascii=False, indent=1),
+                                                              encoding="utf-8")
+    sides, seen = [], set()
+    for f in sorted(pd.glob("*.json")):
+        side = json.loads(f.read_text(encoding="utf-8"))
+        if side.get("doc_id") and side["doc_id"] in seen:
+            continue
+        seen.add(side.get("doc_id"))
+        sides.append(side)
+    return sides
 
 
 def pull_practice(tab, out, sidecars, y_off):
+    """Collect every practice notebook; returns the ids of those with every page written (done)."""
+    done = []
     names = tab.run(f"grep -l rmpp-practice {XO}/*.metadata 2>/dev/null") or b""
     for path in names.decode().split():
         doc = path.rsplit("/", 1)[1].removesuffix(".metadata")
@@ -455,6 +476,9 @@ def pull_practice(tab, out, sidecars, y_off):
         if any(r is None for r in rms):   # a dropped connection must not overwrite earlier results
             print(f"practice {doc}: ssh failed while reading pages, kept the previous result")
             continue
+        written = sum(1 for r in rms if r and read_strokes(r))
+        if written >= side.get("pages", len(rms)) > 0:
+            done.append(doc)
         digest = hashlib.sha1(b"".join(r or b"" for r in rms)).hexdigest()
         if (d / "meta.json").exists() and json.loads((d / "meta.json").read_text())["sha1"] == digest:
             print(f"practice {doc}: unchanged")
@@ -568,8 +592,8 @@ def cmd_pull(a):
         print(sample_name(c), r)
         if r in ("corrected", "unchanged (corrected)"):
             moved.append(c)
-    # Corrected conversions now on the PC are removed from the tablet (record + ink copy), unless --keep.
-    if moved and not a.keep:
+    # Corrected conversions now on the PC are removed from the tablet (record + ink copy) only with --delete.
+    if moved and a.delete:
         jl = shlex.quote(JSONL)
         pats = " ".join("-e " + shlex.quote('"time":"%s"' % c["time"]) for c in moved)
         inks = " ".join(shlex.quote(JSONL.rsplit("/", 1)[0] + "/" + c["ink"]) for c in moved if c.get("ink"))
@@ -591,7 +615,16 @@ def cmd_pull(a):
                 print(d.name, "removed (deleted on the tablet)")
     if counts:
         print("conversions:", ", ".join(f"{v} {k}" for k, v in sorted(counts.items())))
-    pull_practice(tab, out, load_sidecars(out, a.sidecar), a.y_offset)
+    done = pull_practice(tab, out, load_sidecars(out, a.sidecar, tab if reachable else None), a.y_offset)
+    if done:
+        print(f"{len(done)} practice notebook(s) fully written")
+    if done and a.delete:
+        # Done notebooks go to the tablet's trash (the developer can still restore them there); their registry
+        # entries are removed. xochitl reads metadata at start: one restart.
+        ids = " ".join(shlex.quote(d) for d in done)
+        ok = tab.run(f"cd {XO} && for d in {ids}; do sed -i 's/\"parent\": \"[^\"]*\"/\"parent\": \"trash\"/' $d.metadata"
+                     f" && rm -f {REG}/$d.json; done; systemctl reset-failed xochitl; systemctl restart xochitl; echo ok")
+        print(f"{len(done)} done practice notebook(s) moved to the tablet's trash" if ok else "could not trash the done notebooks")
     rows = []
     for p in sorted((out / "samples").glob("*/pairs.tsv")):
         rows += [l for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -634,20 +667,21 @@ def font_file():
     return dst
 
 
-TEXTS = Path(__file__).resolve().parent / "texts"
+TEXTS = Path(__file__).resolve().parent / "texts"   # texts/<language>/*.txt; line notebooks use ko and en
 MAX_LINE = 26   # characters per handwriting band
 
 
 def text_files(names):
     """--text values: a built-in name (story, talk, notes) or a path; none = every built-in text."""
     if not names:
-        return sorted(TEXTS.glob("*.txt"))
+        return sorted(TEXTS.glob("ko/*.txt")) + sorted(TEXTS.glob("en/*.txt"))
     files = []
     for n in names:
         p = Path(n)
-        p = p if p.exists() else TEXTS / (n if n.endswith(".txt") else n + ".txt")
         if not p.exists():
-            sys.exit(f"text not found: {n} (built-in: {', '.join(f.stem for f in sorted(TEXTS.glob('*.txt')))})")
+            p = next(iter(sorted(TEXTS.glob(f"*/{n if n.endswith('.txt') else n + '.txt'}"))), p)
+        if not p.exists():
+            sys.exit(f"text not found: {n} (built-in: {', '.join(f.stem for f in sorted(TEXTS.glob('*/*.txt')))})")
         files.append(p)
     return files
 
@@ -773,15 +807,16 @@ def cmd_practice2(a):
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
     pdfmetrics.registerFont(TTFont("NotoKR", str(font_file())))
-    kinds = a.kinds.split(",") if a.kinds else pages_v2.plan_kinds(a.pages)
-    plan = pages_v2.layout(kinds, a.seed)
+    mix = pages_v2.languages(a.lang)
+    kinds = a.kinds.split(",") if a.kinds else pages_v2.plan_kinds(a.pages, a.lang)
+    plan = pages_v2.layout(kinds, a.seed, a.lang)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    pages_v2.draw_pdf(plan, out, "NotoKR")
-    side = pages_v2.sidecar(plan, a.seed)
+    pages_v2.draw_pdf(plan, out, "NotoKR", lang=a.lang)
+    side = pages_v2.sidecar(plan, a.seed, a.lang)
     out.with_suffix(".json").write_text(json.dumps(side, ensure_ascii=False, indent=1), encoding="utf-8")
     n_cells = sum(len(i.get("cells", [])) for i in side["items"])
-    print(f"{out}: {len(plan)} pages ({', '.join(kinds)}), {len(side['items'])} rows/lines, {n_cells} cells")
+    print(f"{out}: {'+'.join(mix)}, {len(plan)} pages ({', '.join(kinds)}), {len(side['items'])} rows/lines, {n_cells} cells")
 
 
 def cmd_make_doc(a):
@@ -795,7 +830,7 @@ def cmd_make_doc(a):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     meta = {"deleted": False, "lastModified": str(int(time.time() * 1000)), "lastOpened": "", "lastOpenedPage": 0,
-            "metadatamodified": False, "modified": False, "parent": "", "pinned": False, "synced": False,
+            "metadatamodified": False, "modified": False, "parent": a.parent or "", "pinned": False, "synced": False,
             "type": "DocumentType", "version": 0, "visibleName": a.name}
     content = {"coverPageNumber": 0, "documentMetadata": {}, "dummyDocument": False, "extraMetadata": {},
                "fileType": "pdf", "fontName": "", "formatVersion": 1, "lineHeight": -1, "margins": 125,
@@ -843,7 +878,9 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--sidecar", action="append", help="practice FILE.json (repeatable; remembered in OUT/practice)")
     p.add_argument("--y-offset", type=float, default=0.0, help="shift stroke y when matching practice bands")
-    p.add_argument("--keep", action="store_true", help="leave corrected conversions on the tablet after pulling")
+    p.add_argument("--keep", action="store_true", help="(default now; kept for old scripts)")
+    p.add_argument("--delete", action="store_true", help="after downloading: remove corrected conversions and move "
+                   "fully written practice notebooks to the tablet's trash (restarts xochitl)")
     p.set_defaults(f=cmd_pull)
     p = sp.add_parser("practice", help="write a practice PDF and sidecar json")
     p.add_argument("--out", required=True)
@@ -859,6 +896,7 @@ def main():
     p.add_argument("--pages", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--kinds", help="comma list of page kinds: grid,digits,english,free (default: a mix)")
+    p.add_argument("--lang", default="ko", help="the writer's language; the notebook practises it + English + digits")
     p.set_defaults(f=cmd_practice2)
 
     p = sp.add_parser("texts", help="list the texts practice notebooks can use")
@@ -868,6 +906,7 @@ def main():
     p.add_argument("--pdf", required=True)
     p.add_argument("--name", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--parent", help="id of the tablet folder (CollectionType) to put the notebook in")
     p.set_defaults(f=cmd_make_doc)
     p = sp.add_parser("render", help="render a .rm page and its lines (debug)")
     p.add_argument("rm")

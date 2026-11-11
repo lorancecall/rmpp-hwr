@@ -1,0 +1,8 @@
+{
+ "language": "ko",
+ "topics": {
+  "talk": {"name_en": "Daily conversation", "name_ko": "일상 대화", "generator": "hand-written", "reviewed": true},
+  "notes": {"name_en": "Daily notes", "name_ko": "메모·할 일", "generator": "hand-written", "reviewed": true},
+  "story": {"name_en": "Short prose", "name_ko": "짧은 글", "generator": "hand-written", "reviewed": true}
+ }
+}

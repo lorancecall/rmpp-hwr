@@ -34,14 +34,22 @@ hwr practice 100                     # rmpp-practice-100: 100 lines, mixed story
 hwr practice 30 --text talk          # only conversations
 hwr practice 60 --text my-notes.txt  # your own text
 hwr practice --list                  # which texts exist, how many lines each
+hwr practice --v2                    # structured pages (8): your language + English + digits
+hwr practice --v2 --lang en          # English + digits
+hwr tidy                             # move older practice notebooks into "hwr-db/<lang>"
 ```
 
-- The notebook appears in the tablet library. Write each sentence inside its box, one line per box.
+- The notebook appears in the tablet folder **hwr-db/<lang>** (made on first use). Write each sentence inside its
+  box, one line per box.
 - The sentence is the label, so nothing needs correcting. This is the fastest way to collect data.
 - Text files: one line per box (long lines are wrapped at spaces), a blank line between passages.
-  Built-in texts are in `collect/texts/`. Passages used in earlier notebooks are picked last.
+  Built-in texts are in `collect/texts/<language>/` (`ko`, `en`). Passages used in earlier notebooks are picked last.
+- Structured pages (`--v2`) practise a language mix: the language from `--lang` (or `HWR_LANG` in `.env`,
+  default `ko`) + English + digits. `hwr contribute` puts them in the dataset folder of that language
+  (`data/<language>/` in rmpp-hwr-db). Other languages: the "Add a language" issue form of rmpp-hwr-db; adding
+  one here means `collect/texts/<code>/` and an entry in `LANGS` (`collect/pages.py`).
 - The name is `rmpp-practice-<lines>`; if that exists, `-2`, `-3`, ... is added. Only documents whose
-  name starts with `rmpp-practice` are collected.
+  name starts with `rmpp-practice` are collected, in any folder.
 
 ## 2. Convert pages you write anyway
 
@@ -60,14 +68,18 @@ stops recording; Convert page keeps working.
 ## 3. Collect on the PC
 
 ```
-hwr pull           # practice notebooks + corrected conversions -> hwr-data/collected
-hwr pull --keep    # same, but leave the conversions on the tablet
+hwr pull           # practice notebooks + corrected conversions -> hwr-data/collected (tablet unchanged)
+hwr pull --delete  # same, then clean up the tablet (below)
 ```
 
 - Output: `hwr-data/collected/dataset.tsv` (`image path <TAB> text`) and `samples/`. For each conversion:
   `original.rm/png` (handwriting), `converted.txt` (recognized), `corrected.txt` (your text),
   `lines/NN.png`, `pairs.tsv`.
-- Corrected conversions are removed from the tablet after they are on the PC; the PC copy stays.
+- Nothing on the tablet changes unless `--delete`: then corrected conversions are removed from the tablet and
+  fully written practice notebooks go to the tablet's trash (one xochitl restart); the PC copies stay.
+- Practice notebook layouts (sidecars) come from the PC and from the tablet's registry
+  (`/home/root/.local/share/rmpp-hwr/practice/<doc_id>.json`, written by `hwr practice` and by notebooks made
+  on the tablet).
 - Waiting (not corrected) ones stay on the tablet. A record deleted on the tablet before it was pulled is
   removed on the PC too.
 - If the handwriting has a different number of lines from the typed page, lines are matched by content;
@@ -78,7 +90,7 @@ hwr pull --keep    # same, but leave the conversions on the tablet
 
 ```
 hwr train              # upload hwr-data/collected, start retraining (name: my-YYYYMMDD-HHMM)
-hwr train my-v2        # pick the name
+hwr train my-run        # pick the name
 hwr status             # jobs and the last log lines
 ```
 
@@ -89,7 +101,7 @@ lines so nothing is forgotten), fine-tune from the current best model (or the ba
 ## 5. Check the new model
 
 ```
-hwr fetch my-v2        # download and score it
+hwr fetch my-run        # download and score it
 hwr eval               # score the model that is on the tablet now
 hwr models             # all downloaded models and their scores
 ```
@@ -100,13 +112,13 @@ used for training, so models are compared fairly. Lower is better. The base mode
 ## 6. Install it
 
 ```
-hwr deploy my-v2       # install training run my-v2 on the tablet (the old one is kept)
+hwr deploy my-run      # install training run my-run on the tablet (the old one is kept)
 hwr rollback           # go back to the previous model
 ```
 
-Each deployed model gets the next version name, `rmpp-hwr-korean-v1`, `-v2`, ...; the training run it came from
+Each deployed model gets the next version name, `rmpp-hwr-korean-v0.1`, `-v0.2`, ...; the training run it came from
 is recorded in `hwr-train/out/releases.json` (`hwr models` lists both). Settings > Handwriting > Model then shows
-"rmpp-hwr-korean-v3 (error NN%)". The base model is `rmpp-hwr-korean-base`. Only deploy a model that scores lower
+"rmpp-hwr-korean-v0.3 (error NN%)". The base model is `rmpp-hwr-korean-base`. Only deploy a model that scores lower
 than the one on the tablet.
 
 ## Status (2026-11-10)

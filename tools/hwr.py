@@ -3,16 +3,22 @@
 
   hwr install [--model DIR]  install on the tablet (UI add-on, recognizer, model); again after OS updates
   hwr uninstall [--purge]  remove from the tablet
-  hwr pull [--keep]        fetch practice notebooks + corrected conversions -> hwr-data/collected;
-                           moved conversions are removed from the tablet unless --keep
+  hwr pull [--delete]      fetch practice notebooks (any folder; sidecars also from the tablet's registry) +
+                           corrected conversions -> hwr-data/collected; nothing on the tablet changes unless
+                           --delete (corrected conversions removed, fully written notebooks to the trash)
   hwr practice [N] [--text story|talk|notes|FILE.txt]... [--list]
                            new notebook rmpp-practice-N (N lines, default 100) from the texts, onto the tablet
+  hwr practice --v2 [N] [--lang ko|en]
+                           structured pages (N pages, default 8) for your language + English + digits;
+                           notebooks go into the tablet folder "hwr-db/<lang>"
+  hwr tidy [--lang ko]     move older practice notebooks (top level or "hwr-db") into "hwr-db/<lang>"
+  hwr contribute [--lang ko]  share practice pages with rmpp-hwr-db (data/<lang>/); --lang: only that language
   hwr upload               copy hwr-data/collected to the training work dir (data/personal)
   hwr train [NAME]         upload, then personal synth -> fine-tune -> export + judge (see train/README.md)
   hwr status               training jobs and the last lines of the newest log
   hwr fetch NAME           download export/NAME/rec.onnx -> hwr-train/out/NAME, then eval it
   hwr eval [NAME]          error rate (CER) of a model on your eval lines; no NAME = the model on the tablet
-  hwr deploy NAME [--as V] install hwr-train/out/NAME on the tablet as the next rmpp-hwr-korean-vN
+  hwr deploy NAME [--as V] install hwr-train/out/NAME on the tablet as the next rmpp-hwr-korean-v0.N
                            (keeps the old model for rollback; versions in hwr-train/out/releases.json)
   hwr rollback             put the previous model back on the tablet
   hwr models               list downloaded models and their eval results
@@ -34,6 +40,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 from pathlib import Path
 
 DEV = Path(__file__).resolve().parents[2]                 # rmpp-dev
@@ -77,7 +85,7 @@ def need(key):
 
 
 TABLET = cfg("RMPP_HOST", "rmpp")
-TABLET_CMDS = {"pull", "practice", "eval", "deploy", "rollback", "models", "install", "uninstall"}
+TABLET_CMDS = {"pull", "practice", "tidy", "eval", "deploy", "rollback", "models", "install", "uninstall"}
 
 
 def pick_tablet():
@@ -123,7 +131,7 @@ def cmd_pull(a):
         if not (COLLECTED / "practice" / j.name).exists():
             sidecars += ["--sidecar", str(j)]
     run([py(), "-I", str(COLLECT), "pull", "--host", cfg("RMPP_IP") or TABLET, "--key", str(Path(cfg("RMPP_KEY", "~/.ssh/id_ed25519_rmpp")).expanduser()),
-         "--out", str(COLLECTED), *sidecars, *(["--keep"] if a.keep else [])], env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+         "--out", str(COLLECTED), *sidecars, *(["--delete"] if a.delete else [])], env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     tsv = COLLECTED / "dataset.tsv"
     n = sum(1 for _ in tsv.open(encoding="utf-8")) if tsv.exists() else 0
     print(f"{n} labelled lines in {tsv}")
@@ -150,7 +158,7 @@ def cmd_practice(a):
             stem = f"practice-v2-{a.count}p-{k}"
         pdf = DATA / f"{stem}.pdf"
         run([py(), "-I", str(COLLECT), "practice2", "--out", str(pdf), "--pages", str(a.count), "--seed", str(seed),
-             *(["--kinds", a.kinds] if a.kinds else [])], env=env)
+             "--lang", a.lang or cfg("HWR_LANG", "ko"), *(["--kinds", a.kinds] if a.kinds else [])], env=env)
     else:
         avoid = [x for j in sorted(DATA.glob("practice-*.json")) for x in ("--avoid", str(j))]
         run([py(), "-I", str(COLLECT), "practice", "--out", str(pdf), "--count", str(a.count), "--seed", str(seed),
@@ -158,13 +166,77 @@ def cmd_practice(a):
     if a.no_upload:
         print(f"wrote {pdf} (not uploaded)")
         return
+    lang = (a.lang or cfg("HWR_LANG", "ko")) if a.v2 else "ko"      # line notebooks are Korean + English
     stage = Path(tempfile.mkdtemp(prefix=f"{stem}-"))
-    run([py(), "-I", str(COLLECT), "make-doc", "--pdf", str(pdf), "--name", f"rmpp-{stem}", "--out", str(stage)], env=env)
+    folder = tablet_folder(lang, stage)
+    run([py(), "-I", str(COLLECT), "make-doc", "--pdf", str(pdf), "--name", f"rmpp-{stem}", "--out", str(stage),
+         "--parent", folder], env=env)
     # relative names: scp would read "C:\..." as a host name
     run(["scp", "-q", "-r", *[p.name for p in stage.iterdir()], f"{TABLET}:{XOCHITL}/"], cwd=stage)
+    # the sidecar (with doc_id from make-doc) goes to the tablet's registry: the tablet lists the notebook and
+    # `hwr pull` on any computer finds its layout
+    side = json.loads(pdf.with_suffix(".json").read_text(encoding="utf-8"))
+    if side.get("doc_id"):
+        ssh(TABLET, f"mkdir -p {DEV_DIR}/practice")
+        run(["scp", "-q", pdf.with_suffix(".json").name, f"{TABLET}:{DEV_DIR}/practice/{side['doc_id']}.json"], cwd=DATA)
     restart_xochitl()
     shutil.rmtree(stage, ignore_errors=True)
-    print(f"rmpp-{stem} ({a.count} {'pages' if a.v2 else 'lines'}) is on the tablet")
+    print(f"rmpp-{stem} ({a.count} {'pages' if a.v2 else 'lines'}) is on the tablet, in the folder {FOLDER}/{lang}")
+
+
+FOLDER = "hwr-db"   # tablet folder; practice notebooks in FOLDER/<lang>/ (pull finds them by name, wherever they are)
+
+
+def find_folder(name, parent=""):
+    """Id of the tablet folder (CollectionType) `name` inside `parent` ("" = top level), or None."""
+    ids = ssh(TABLET, f"cd {XOCHITL} && for f in $(grep -l CollectionType *.metadata 2>/dev/null); do "
+                      f"grep -q 'visibleName.: .{name}.' $f && grep -q 'parent.: .{parent}.' $f && "
+                      f"! grep -q 'deleted.: true' $f && echo ${{f%.metadata}}; done; true", capture=True).split()
+    return ids[0] if ids else None
+
+
+def new_folder(stage, name, parent=""):
+    """Write the files of a new tablet folder into `stage` (copied to the tablet with the notebook)."""
+    fid = str(uuid.uuid4())
+    meta = {"deleted": False, "lastModified": str(int(time.time() * 1000)), "metadatamodified": False,
+            "modified": False, "parent": parent, "pinned": False, "synced": False, "type": "CollectionType",
+            "version": 0, "visibleName": name}
+    (stage / f"{fid}.metadata").write_text(json.dumps(meta, indent=4))
+    (stage / f"{fid}.content").write_text(json.dumps({"tags": []}, indent=4))
+    return fid
+
+
+def tablet_folder(lang, stage=None):
+    """Id of the tablet folder FOLDER/<lang> (practice notebooks and Conversions of one language). Missing folders
+    are written into `stage` when given; otherwise None is returned for them."""
+    root = find_folder(FOLDER)
+    if not root and stage is None:
+        return None
+    root = root or new_folder(stage, FOLDER)
+    sub = find_folder(lang, root)
+    if not sub and stage is None:
+        return None
+    return sub or new_folder(stage, lang, root)
+
+
+def cmd_tidy(a):
+    """Move practice notebooks at the top level or directly in FOLDER into FOLDER/<lang>."""
+    lang = a.lang or cfg("HWR_LANG", "ko")
+    stage = Path(tempfile.mkdtemp(prefix="hwr-folder-"))
+    root = find_folder(FOLDER)
+    fid = tablet_folder(lang, stage)
+    made = list(stage.iterdir())
+    if made:
+        run(["scp", "-q", *[p.name for p in made], f"{TABLET}:{XOCHITL}/"], cwd=stage)
+    shutil.rmtree(stage, ignore_errors=True)
+    parents = [""] + ([root] if root else [])
+    moved = ssh(TABLET, f"cd {XOCHITL} && for f in $(grep -l 'visibleName.: .rmpp-practice' *.metadata 2>/dev/null); do "
+                        + " ".join(f"grep -q 'parent.: \"{p}\"' $f && sed -i 's/\"parent\": \"{p}\"/\"parent\": \"{fid}\"/' $f && echo $f;"
+                                   for p in parents)
+                        + " done; true", capture=True).split()
+    if moved or made:
+        restart_xochitl()
+    print(f"{len(moved)} practice notebook(s) moved into {FOLDER}/{lang}")
 
 
 # ---- training backends: local GPU or Slurm cluster (settings in .env) ----
@@ -447,6 +519,7 @@ def cmd_qc(a):
 
 # ---- open dataset (rmpp-hwr-db) ----
 DB_FORMAT = "rmpp-hwr-db/page@1"
+OLD_MIX = ["ko", "en", "digits"]
 
 
 def writer_info(consent=None):
@@ -470,6 +543,7 @@ def anonymize(strokes_json, writer):
     session = hashlib.sha256(f"{writer}:{doc}".encode()).hexdigest()[:16]
     t = src["template"]
     tmpl = {k: t[k] for k in ("format", "page_px", "dpi", "seed", "page_kinds")}
+    tmpl["languages"] = t.get("languages") or OLD_MIX      # notebooks made before language mixes: Korean
     out = []
     # same patterns as rmpp-hwr-db/scripts/validate.py: practice prompts that merely look like contact data
     # (random phone numbers, e-mail-like words) are left out rather than rejected by the dataset CI
@@ -507,6 +581,9 @@ def cmd_contribute(a):
         sys.exit(f"First join (consent form): https://github.com/{repo}/issues/new?template=join.yml\n"
                  f"then run: hwr contribute --consent <issue number>")
     files = sorted(COLLECTED.glob("samples/practice_*/strokes.json"))
+    if a.lang:     # only notebooks of this language (the first language of their mix)
+        files = [f for f in files if (json.loads(f.read_text(encoding="utf-8"))["template"].get("languages")
+                                      or OLD_MIX)[0] == a.lang]
     if not files:
         sys.exit("no practice v2 pages collected yet: `hwr practice --v2`, write them, then `hwr pull`")
     import hashlib
@@ -526,22 +603,26 @@ def cmd_contribute(a):
     wid = w["writer"]
     branch = f"contrib/{wid[:8]}-{dt.datetime.now().strftime('%Y%m%d%H%M')}"
     git("checkout", "-q", "-b", branch)
-    wdir = clone / "writers" / wid
-    wdir.mkdir(parents=True, exist_ok=True)
     meta = {"writer": wid, "consent_issue": w["consent_issue"], "license": "CC-BY-4.0"}
     for k in ("handedness", "age_band"):
         if w.get(k): meta[k] = w[k]
-    (wdir / "writer.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8", newline="\n")
     n = 0
     for f in todo:
         q = json.loads((f.parent / "qc.json").read_text(encoding="utf-8")) if (f.parent / "qc.json").exists() else {}
-        for session, pi, rec in anonymize(f, wid):
+        recs = anonymize(f, wid)
+        if not recs:
+            continue
+        # one folder per language: data/<the writer's language (first of the mix)>/<writer>/
+        wdir = clone / "data" / recs[0][2]["template"]["languages"][0] / wid
+        wdir.mkdir(parents=True, exist_ok=True)
+        (wdir / "writer.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8", newline="\n")
+        for session, pi, rec in recs:
             rec["qc"] = [x for x in q.get("items", []) if x["page"] == pi]
             dst = wdir / session / f"page-{pi:02d}.json"
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_text(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8", newline="\n")
             n += 1
-    git("add", "writers")
+    git("add", "data")
     run(["git", "-C", str(clone), "-c", "user.name=rmpp-hwr contributor",
          "-c", "user.email=contributor@users.noreply.github.com", "commit", "-q", "-m",
          f"Add {n} page(s) from writer {wid[:8]}"])
@@ -635,7 +716,10 @@ def cmd_install(a):
             shutil.copy((model / "dict.txt") if (model / "dict.txt").exists() else BASE_MODEL / "dict.txt", st / "dict.txt.new")
             if (model / "model.txt").exists():   # the model's name in Settings > Handwriting
                 shutil.copy(model / "model.txt", st / "model.txt.new")
-        ssh(TABLET, f"mkdir -p {DEV_DIR}")
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import texts                                          # practice texts from this checkout
+        texts.build(st / "texts.tar")
+        ssh(TABLET, f"mkdir -p {DEV_DIR}/practice")
         run(["scp", "-q", *[p.name for p in st.iterdir()], f"{TABLET}:{DEV_DIR}/"], cwd=st)
     names = ["librmpp_hwr.so", "libonnxruntime.so"] + (["glyphs.json"] if glyphs.exists() else []) + \
         (["rec.onnx", "dict.txt"] if model else []) + \
@@ -643,6 +727,8 @@ def cmd_install(a):
     mv = " && ".join(f"mv -f {DEV_DIR}/{n}.new {DEV_DIR}/{n}" for n in names)
     ssh(TABLET, "set -e\n"
                 f"{mv}\n"
+                f"rm -rf {DEV_DIR}/texts.new && mkdir -p {DEV_DIR}/texts.new && tar -xf {DEV_DIR}/texts.tar -C {DEV_DIR}/texts.new\n"
+                f"rm -rf {DEV_DIR}/texts && mv {DEV_DIR}/texts.new {DEV_DIR}/texts && rm -f {DEV_DIR}/texts.tar\n"
                 "mount -o remount,rw /\n"
                 "mkdir -p /usr/lib/rmpp-hwr\n"
                 f"cp {DEV_DIR}/librmpp-hwr-ui.so.new /usr/lib/rmpp-hwr/librmpp-hwr-ui.so.new\n"
@@ -676,8 +762,9 @@ def cmd_uninstall(a):
 
 
 # ---- tablet model ----
-MODEL_NAME = "rmpp-hwr-korean"          # base model: rmpp-hwr-korean-base; personal models: -v1, -v2, ...
-RELEASES = OUT / "releases.json"          # {"rmpp-hwr-korean-v2": {"run": "fix3", "eval12": ..., "time": ...}}
+MODEL_NAME = "rmpp-hwr-korean"          # base model: rmpp-hwr-korean-base; personal models: -v0.1, -v0.2, ...
+MODEL_LANG = "ko"                        # language code in models/<version>/pack.json (ko, en, ja, zh, latin)
+RELEASES = OUT / "releases.json"          # {"rmpp-hwr-korean-v0.2": {"run": "fix3", "eval12": ..., "time": ...}}
 
 
 def releases():
@@ -685,13 +772,13 @@ def releases():
 
 
 def release_name(run_name):
-    """The version name of a training run: the one it was deployed under before, else the next free vN."""
+    """The version name of a training run: the one it was deployed under before, else the next free v0.N."""
     rel = releases()
     for k, v in rel.items():
         if v.get("run") == run_name:
             return k
-    n = max([int(k.rsplit("-v", 1)[1]) for k in rel if re.search(r"-v\d+$", k)] or [0]) + 1
-    return f"{MODEL_NAME}-v{n}"
+    n = max([int(m.group(1)) for k in rel if (m := re.search(r"-v0\.(\d+)$", k))] or [0]) + 1
+    return f"{MODEL_NAME}-v0.{n}"
 
 
 def cmd_deploy(a):
@@ -709,9 +796,14 @@ def cmd_deploy(a):
     backup_tablet()
     with tempfile.TemporaryDirectory() as t:
         (Path(t) / "model.txt").write_text(desc + "\n", encoding="utf-8")
-        run(["scp", "-q", str(d / "rec.onnx"), str(Path(t) / "model.txt"), f"{TABLET}:{DEV_DIR}/"])
+        (Path(t) / "pack.json").write_text(json.dumps({"language": MODEL_LANG}) + "\n", encoding="utf-8")
+        run(["scp", "-q", "rec.onnx", f"{TABLET}:{DEV_DIR}/"], cwd=d)
+        run(["scp", "-q", "model.txt", "pack.json", f"{TABLET}:{DEV_DIR}/"], cwd=t)
+    # keep every deployed version under models/<version>/ so Settings > Handwriting can switch between them;
+    # pack.json tells the picker which language group the model belongs to
+    ssh(TABLET, f"cd {DEV_DIR} && mkdir -p models/{ver} && cp rec.onnx dict.txt model.txt pack.json models/{ver}/")
     restart_xochitl()   # the recognizer caches the model after first use
-    print(f"installed: {desc}")
+    print(f"installed: {desc} (also kept in {DEV_DIR}/models/{ver})")
 
 
 def backup_tablet():
@@ -729,8 +821,10 @@ def main():
     for f in (sys.stdout, sys.stderr): f.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(prog="hwr", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
-    p = sp.add_parser("pull", help="collect from the tablet; corrected conversions are then removed there")
-    p.add_argument("--keep", action="store_true", help="leave them on the tablet")
+    p = sp.add_parser("pull", help="collect practice notebooks and corrected conversions from the tablet")
+    p.add_argument("--delete", action="store_true", help="then remove corrected conversions and move fully written "
+                   "practice notebooks to the tablet's trash (one xochitl restart)")
+    p.add_argument("--keep", action="store_true", help=argparse.SUPPRESS)   # the default now
     p.set_defaults(f=cmd_pull)
     p = sp.add_parser("practice", help="new practice notebook rmpp-practice-<count> on the tablet")
     p.add_argument("count", nargs="?", type=int, help="lines to write (default 100); with --v2: pages (default 8)")
@@ -739,7 +833,11 @@ def main():
     p.add_argument("--no-upload", action="store_true", help="only write the PDF")
     p.add_argument("--v2", action="store_true", help="structured pages (cells, guides, sizes); count = pages")
     p.add_argument("--kinds", help="v2 page kinds, comma list of grid,digits,english,free (default: a mix)")
+    p.add_argument("--lang", help="v2: your language (ko, en; default HWR_LANG or ko); pages mix it with English and digits")
     p.set_defaults(f=cmd_practice)
+    p = sp.add_parser("tidy", help='move practice notebooks at the top level or in "hwr-db" into "hwr-db/<lang>"')
+    p.add_argument("--lang", help="language folder (default HWR_LANG or ko)")
+    p.set_defaults(f=cmd_tidy)
     sp.add_parser("upload").set_defaults(f=cmd_upload)
     p = sp.add_parser("qc", help="check collected lines (labels vs writing) before training")
     p.add_argument("--cer", type=float, default=0.6, help="flag lines whose base-model CER is above this")
@@ -751,9 +849,9 @@ def main():
     p = sp.add_parser("status"); p.add_argument("--lines", type=int, default=3); p.set_defaults(f=cmd_status)
     p = sp.add_parser("fetch"); p.add_argument("name"); p.set_defaults(f=cmd_fetch)
     p = sp.add_parser("eval"); p.add_argument("name", nargs="?"); p.set_defaults(f=cmd_eval)
-    p = sp.add_parser("deploy", help="install a trained model on the tablet as the next rmpp-hwr-korean-vN")
+    p = sp.add_parser("deploy", help="install a trained model on the tablet as the next rmpp-hwr-korean-v0.N")
     p.add_argument("name", help="training run (hwr-train/out/NAME)")
-    p.add_argument("--as", dest="as_", help="version name to use instead of the next rmpp-hwr-korean-vN")
+    p.add_argument("--as", dest="as_", help="version name to use instead of the next rmpp-hwr-korean-v0.N")
     p.set_defaults(f=cmd_deploy)
     sp.add_parser("rollback").set_defaults(f=cmd_rollback)
     sp.add_parser("models").set_defaults(f=cmd_models)
@@ -770,6 +868,7 @@ def main():
     p.add_argument("--consent", type=int, help="number of your join issue in the dataset repo (once)")
     p.add_argument("--all", action="store_true", help="also re-share pages shared before")
     p.add_argument("--dry-run", action="store_true", help="commit locally, do not push or open a PR")
+    p.add_argument("--lang", help="only notebooks of this language (ko, en, ...)")
     p.set_defaults(f=cmd_contribute)
     p = sp.add_parser("dataset", help="copy a downloaded dataset folder to <work>/data/NAME")
     p.add_argument("path"); p.add_argument("name"); p.set_defaults(f=cmd_dataset)
