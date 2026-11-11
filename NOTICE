@@ -10,8 +10,12 @@ train/patches/paddleocr-rmpp.patch
 onnxruntime (loaded at run time, not included)
   Copyright Microsoft Corporation. MIT License. https://github.com/microsoft/onnxruntime
 
-Noto Sans KR (downloaded at run time for practice PDFs, not included)
+Noto Sans KR (downloaded at build time for practice PDFs and glyphs.json, not included)
   SIL Open Font License 1.1. https://github.com/google/fonts
+
+glyphs.json (release asset, built by ink/glyphs.py)
+  Glyph centre lines derived from Noto Sans KR, Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved
+  Font Name 'Source'. SIL Open Font License 1.1; the license text is in ink/OFL-NotoSansKR.txt.
 
 Training data used by train/ (not included; each user obtains it):
   jbaudanza/korean-handwriting-strokes (Hugging Face), CC BY-SA 4.0.

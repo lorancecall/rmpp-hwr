@@ -14,6 +14,16 @@ fn main() {
         }
         return;
     }
+    if args.len() >= 3 && args[1] == "--strokes" {   // rmpp-hwr --strokes page.rm...: stroke count or the parse error
+        for path in &args[2..] {
+            let data = std::fs::read(path).expect("read");
+            match rmpp_hwr::rm::read_strokes(&data) {
+                Ok(s) => println!("{path}: {} strokes", s.len()),
+                Err(e) => println!("{path}: error: {e}"),
+            }
+        }
+        return;
+    }
     if args.len() < 3 {
         eprintln!("usage: rmpp-hwr <model-dir> <line.png>...");
         std::process::exit(2);

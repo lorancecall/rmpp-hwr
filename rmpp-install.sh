@@ -9,6 +9,8 @@ mkdir -p "$D"
 for f in librmpp_hwr.so libonnxruntime.so; do
 	cp "$f" "$D/$f.new" && mv -f "$D/$f.new" "$D/$f"
 done
+cp glyphs.json "$D/glyphs.json.new" && mv -f "$D/glyphs.json.new" "$D/glyphs.json"   # strokes for Convert to ink
+rm -f "$D/librmpp_hwr_ink.so"               # left over from the Convert to ink prototype
 if [ ! -f "$D/rec.onnx" ]; then            # keep a personal model that was deployed with `hwr deploy`
 	for f in rec.onnx dict.txt model.txt; do
 		if [ -f "$f" ]; then cp "$f" "$D/$f.new" && mv -f "$D/$f.new" "$D/$f"; fi
