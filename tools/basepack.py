@@ -30,6 +30,9 @@ BUCKET = "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_
 PACKS = {
     "zh": ("rmpp-hwr-chinese-base", "PP-OCRv5_mobile_rec", "PaddleOCR PP-OCRv5 mobile: Chinese, Japanese, English"),
     "ja": ("rmpp-hwr-japanese-base", "PP-OCRv5_mobile_rec", "PaddleOCR PP-OCRv5 mobile: Japanese, Chinese, English"),
+    "en": ("rmpp-hwr-english-base", "en_PP-OCRv5_mobile_rec", "PaddleOCR PP-OCRv5 mobile: English"),
+    # French, German, Spanish, Italian, Portuguese and other Latin-script languages (accents included)
+    "latin": ("rmpp-hwr-latin-base", "latin_PP-OCRv5_mobile_rec", "PaddleOCR PP-OCRv5 mobile: Latin-script languages"),
 }
 TABLET = "rmpp"
 MODELS = "/home/root/.local/share/rmpp-hwr/models"
