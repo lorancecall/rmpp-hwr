@@ -29,7 +29,9 @@ python -I collect.py render page1.rm --out dbg
 
 # practice notebook
 python -I collect.py practice --out practice.pdf --count 30 --seed 1     # also writes practice.json
-python -I collect.py make-doc --pdf practice.pdf --name rmpp-practice-1 --out stage
+python -I collect.py make-doc --pdf practice.pdf --name rmpp-practice-1 --out stage [--parent <folder id>]
+# structured pages (v2) for a language mix: --lang ko = Korean + English + digits, --lang en = English + digits
+python -I collect.py practice2 --out practice-v2.pdf --pages 8 --seed 1 --lang ko
 ```
 
 ### pull output

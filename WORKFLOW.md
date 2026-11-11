@@ -34,14 +34,22 @@ hwr practice 100                     # rmpp-practice-100: 100 lines, mixed story
 hwr practice 30 --text talk          # only conversations
 hwr practice 60 --text my-notes.txt  # your own text
 hwr practice --list                  # which texts exist, how many lines each
+hwr practice --v2                    # structured pages (8): your language + English + digits
+hwr practice --v2 --lang en          # English + digits
+hwr tidy                             # move older practice notebooks into the "hwr-db" folder
 ```
 
-- The notebook appears in the tablet library. Write each sentence inside its box, one line per box.
+- The notebook appears in the tablet folder **hwr-db** (made on first use). Write each sentence inside its
+  box, one line per box.
 - The sentence is the label, so nothing needs correcting. This is the fastest way to collect data.
 - Text files: one line per box (long lines are wrapped at spaces), a blank line between passages.
-  Built-in texts are in `collect/texts/`. Passages used in earlier notebooks are picked last.
+  Built-in texts are in `collect/texts/<language>/` (`ko`, `en`). Passages used in earlier notebooks are picked last.
+- Structured pages (`--v2`) practise a language mix: the language from `--lang` (or `HWR_LANG` in `.env`,
+  default `ko`) + English + digits. `hwr contribute` puts them in the dataset folder of that language
+  (`data/<language>/` in rmpp-hwr-db). Other languages: the "Add a language" issue form of rmpp-hwr-db; adding
+  one here means `collect/texts/<code>/` and an entry in `LANGS` (`collect/pages.py`).
 - The name is `rmpp-practice-<lines>`; if that exists, `-2`, `-3`, ... is added. Only documents whose
-  name starts with `rmpp-practice` are collected.
+  name starts with `rmpp-practice` are collected, in any folder.
 
 ## 2. Convert pages you write anyway
 

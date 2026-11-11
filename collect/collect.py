@@ -634,20 +634,21 @@ def font_file():
     return dst
 
 
-TEXTS = Path(__file__).resolve().parent / "texts"
+TEXTS = Path(__file__).resolve().parent / "texts"   # texts/<language>/*.txt; line notebooks use ko and en
 MAX_LINE = 26   # characters per handwriting band
 
 
 def text_files(names):
     """--text values: a built-in name (story, talk, notes) or a path; none = every built-in text."""
     if not names:
-        return sorted(TEXTS.glob("*.txt"))
+        return sorted(TEXTS.glob("ko/*.txt")) + sorted(TEXTS.glob("en/*.txt"))
     files = []
     for n in names:
         p = Path(n)
-        p = p if p.exists() else TEXTS / (n if n.endswith(".txt") else n + ".txt")
         if not p.exists():
-            sys.exit(f"text not found: {n} (built-in: {', '.join(f.stem for f in sorted(TEXTS.glob('*.txt')))})")
+            p = next(iter(sorted(TEXTS.glob(f"*/{n if n.endswith('.txt') else n + '.txt'}"))), p)
+        if not p.exists():
+            sys.exit(f"text not found: {n} (built-in: {', '.join(f.stem for f in sorted(TEXTS.glob('*/*.txt')))})")
         files.append(p)
     return files
 
@@ -773,15 +774,16 @@ def cmd_practice2(a):
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
     pdfmetrics.registerFont(TTFont("NotoKR", str(font_file())))
-    kinds = a.kinds.split(",") if a.kinds else pages_v2.plan_kinds(a.pages)
-    plan = pages_v2.layout(kinds, a.seed)
+    mix = pages_v2.languages(a.lang)
+    kinds = a.kinds.split(",") if a.kinds else pages_v2.plan_kinds(a.pages, a.lang)
+    plan = pages_v2.layout(kinds, a.seed, a.lang)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    pages_v2.draw_pdf(plan, out, "NotoKR")
-    side = pages_v2.sidecar(plan, a.seed)
+    pages_v2.draw_pdf(plan, out, "NotoKR", lang=a.lang)
+    side = pages_v2.sidecar(plan, a.seed, a.lang)
     out.with_suffix(".json").write_text(json.dumps(side, ensure_ascii=False, indent=1), encoding="utf-8")
     n_cells = sum(len(i.get("cells", [])) for i in side["items"])
-    print(f"{out}: {len(plan)} pages ({', '.join(kinds)}), {len(side['items'])} rows/lines, {n_cells} cells")
+    print(f"{out}: {'+'.join(mix)}, {len(plan)} pages ({', '.join(kinds)}), {len(side['items'])} rows/lines, {n_cells} cells")
 
 
 def cmd_make_doc(a):
@@ -795,7 +797,7 @@ def cmd_make_doc(a):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     meta = {"deleted": False, "lastModified": str(int(time.time() * 1000)), "lastOpened": "", "lastOpenedPage": 0,
-            "metadatamodified": False, "modified": False, "parent": "", "pinned": False, "synced": False,
+            "metadatamodified": False, "modified": False, "parent": a.parent or "", "pinned": False, "synced": False,
             "type": "DocumentType", "version": 0, "visibleName": a.name}
     content = {"coverPageNumber": 0, "documentMetadata": {}, "dummyDocument": False, "extraMetadata": {},
                "fileType": "pdf", "fontName": "", "formatVersion": 1, "lineHeight": -1, "margins": 125,
@@ -859,6 +861,7 @@ def main():
     p.add_argument("--pages", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--kinds", help="comma list of page kinds: grid,digits,english,free (default: a mix)")
+    p.add_argument("--lang", default="ko", help="the writer's language; the notebook practises it + English + digits")
     p.set_defaults(f=cmd_practice2)
 
     p = sp.add_parser("texts", help="list the texts practice notebooks can use")
@@ -868,6 +871,7 @@ def main():
     p.add_argument("--pdf", required=True)
     p.add_argument("--name", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--parent", help="id of the tablet folder (CollectionType) to put the notebook in")
     p.set_defaults(f=cmd_make_doc)
     p = sp.add_parser("render", help="render a .rm page and its lines (debug)")
     p.add_argument("rm")

@@ -24,24 +24,57 @@ FORMAT = "rmpp-hwr/practice@2"
 
 CELL_MM = {"S": 7, "M": 10, "L": 14}          # grid cell sizes
 LINE_MM = {"S": 4.5, "M": 6, "L": 8}          # english: distance between two guide lines
-TEXTS = Path(__file__).resolve().parent / "texts"
+TEXTS = Path(__file__).resolve().parent / "texts"  # texts/<language code>/*.txt
 
-LOOKALIKE = ["0 O o ㅇ", "1 l I ㅣ |", "5 S s", "2 Z z", "7 ㄱ", "ㅌ E", "ㅂ B", "ㄹ 2 Z", "6 b", "9 g q",
-             "ㅁ □ 口", "u v", "rn m", "cl d", "- ㅡ _", ". , ;", "( ) [ ]", "% & @"]
-HANGUL = re.compile(r"[가-힣]")
+LOOKALIKE = ["0 O o", "1 l I |", "5 S s", "2 Z z", "6 b", "9 g q", "u v", "rn m", "cl d", "- _", ". , ;",
+             "( ) [ ]", "% & @"]
+
+HEADERS_EN = {
+    "grid": "One character per white cell. Grey cells are spaces: leave them empty. Your usual handwriting.",
+    "digits": "One character (digit, symbol) per cell. Make look-alikes clearly different.",
+    "english": "Write on the four lines: small letters in the middle band, tails of g y p in the bottom band.",
+    "free": "Write naturally on the line. Lines marked 'fast': write quickly, like everyday notes.",
+}
+
+# A notebook practises one mix: the writer's own language + English + digits (for English writers: English +
+# digits). To add a language: texts/<code>/*.txt (public-domain or openly licensed text), an entry here, and a
+# font in collect/fonts/ that covers it. `cells` = the characters a grid cell holds (None: no grid pages).
+LANGS = {
+    "ko": {"name": "Korean", "cells": "가-힣", "font": "NotoSansKR-Regular.ttf", "money": "{:,}원",
+           "lookalike": ["0 O o ㅇ", "1 l I ㅣ |", "7 ㄱ", "ㅌ E", "ㅂ B", "ㄹ 2 Z", "ㅁ □ 口", "- ㅡ _"],
+           "fast": "빠르게",
+           "headers": {
+               "grid": "흰 칸에 한 글자씩 쓰세요. 회색 칸은 띄어쓰기라 비워 둡니다. 평소 글씨체로.",
+               "digits": "칸마다 한 글자(숫자, 기호)씩 쓰세요. 비슷한 글자는 서로 다르게 보이도록.",
+               "english": "영어는 네 줄에 맞춰 쓰세요: 소문자 몸통은 가운데 칸, g y p 꼬리는 아래 칸.",
+               "free": "줄 위에 자연스럽게 쓰세요. '빠르게' 표시가 있는 줄은 평소 메모하듯 빨리.",
+           }},
+    "en": {"name": "English", "cells": None, "font": "NotoSansKR-Regular.ttf", "money": "${:,}",
+           "lookalike": [], "fast": "fast", "headers": HEADERS_EN},
+}
 
 
-def _ko_chunks(rng, n, width):
-    """Korean text pieces (Hangul + spaces only) of at most `width` characters, from the built-in texts."""
+def languages(lang):
+    """The mix a notebook in `lang` practises, e.g. ko -> [ko, en, digits]."""
+    if lang not in LANGS:
+        raise SystemExit(f"no practice texts for language '{lang}' yet (have: {', '.join(LANGS)}); "
+                         "ask for it with the 'add a language' issue form of rmpp-hwr-db")
+    return [lang, "digits"] if lang == "en" else [lang, "en", "digits"]
+
+
+def _lines(lang):
+    return [l for f in sorted((TEXTS / lang).glob("*.txt")) for l in f.read_text(encoding="utf-8").splitlines()]
+
+
+def _chunks(rng, n, width, lang):
+    """Text pieces of at most `width` characters (only grid characters and spaces) from the language's texts."""
+    cls = LANGS[lang]["cells"]
     src = []
-    for f in sorted(TEXTS.glob("*.txt")):
-        if f.name == "english.txt":
-            continue
-        for line in f.read_text(encoding="utf-8").splitlines():
-            s = re.sub(r"[^가-힣 ]", " ", line)
-            s = re.sub(r"\s+", " ", s).strip()
-            if len(HANGUL.findall(s)) >= 3:
-                src.append(s)
+    for line in _lines(lang):
+        s = re.sub(rf"[^{cls} ]", " ", line)
+        s = re.sub(r"\s+", " ", s).strip()
+        if len(re.findall(rf"[{cls}]", s)) >= 3:
+            src.append(s)
     words = " ".join(src).split(" ")          # one running stream, so a row can be filled across lines
     out = []
     while len(out) < n:
@@ -54,14 +87,15 @@ def _ko_chunks(rng, n, width):
     return out
 
 
-def _digit_items(rng, n, width):
+def _digit_items(rng, n, width, lang):
+    L = LANGS[lang]
     gens = [
         lambda: f"{rng.randint(1, 12)}/{rng.randint(1, 28)} {rng.randint(1, 12)}:{rng.choice([0, 15, 30, 45]):02d}",
-        lambda: f"{rng.randint(1000, 99999):,}원",
+        lambda: L["money"].format(rng.randint(1000, 99999)),
         lambda: f"{rng.randint(0, 100)}% {rng.randint(1, 9)}.{rng.randint(0, 9)}kg",
         lambda: f"2026-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}",
         lambda: "".join(str(rng.randint(0, 9)) for _ in range(rng.randint(width // 2, width))),
-        lambda: rng.choice(LOOKALIKE),
+        lambda: rng.choice(LOOKALIKE + L["lookalike"]),
         lambda: (lambda x, y: f"{x}+{y}={x + y}")(rng.randint(1, 99), rng.randint(1, 99)),
         lambda: (lambda x, y: f"{x}x{y}={x * y}")(rng.randint(2, 19), rng.randint(2, 19)),
     ]
@@ -79,17 +113,15 @@ _EN_POOL = []
 def _english(rng, n):
     """English sentences without repeats until the list is used up."""
     if len(_EN_POOL) < n:
-        lines = [l.strip() for l in (TEXTS / "english.txt").read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [l.strip() for l in _lines("en") if l.strip()]
         rng.shuffle(lines)
         _EN_POOL.extend(lines)
     return [_EN_POOL.pop() for _ in range(n)]
 
 
-def _free(rng, n):
-    src = []
-    for f in sorted(TEXTS.glob("*.txt")):
-        src += [l.strip().lstrip("-").strip() for l in f.read_text(encoding="utf-8").splitlines()
-                if 6 <= len(l.strip()) <= 34]
+def _free(rng, n, lang):
+    src = [l.strip().lstrip("-").strip() for g in dict.fromkeys([lang, "en"]) for l in _lines(g)
+           if 6 <= len(l.strip()) <= 34]
     return [rng.choice(src) for _ in range(n)]
 
 
@@ -98,8 +130,10 @@ def _rm(x, y):
     return x - PX_W / 2, y
 
 
-def layout(kinds, seed):
+def layout(kinds, seed, lang="ko"):
     """Plan pages: list of (kind, [items]). Every item: kind, text, box (page px), plus guide details."""
+    if "grid" in kinds and not LANGS[lang]["cells"]:
+        raise SystemExit(f"{LANGS[lang]['name']} has no grid pages")
     rng = random.Random(seed)
     pages = []
     for kind in kinds:
@@ -115,7 +149,7 @@ def layout(kinds, seed):
                 h = 46 + cell
                 if y + h > PX_H - 80:
                     break
-                text = (_ko_chunks(rng, 1, ncell) if kind == "grid" else _digit_items(rng, 1, ncell))[0]
+                text = (_chunks(rng, 1, ncell, lang) if kind == "grid" else _digit_items(rng, 1, ncell, lang))[0]
                 x0 = MARGIN
                 cells = []
                 for i, ch in enumerate(text):
@@ -140,7 +174,7 @@ def layout(kinds, seed):
                 h = 46 + 130
                 if y + h > PX_H - 80:
                     break
-                text = _free(rng, 1)[0]
+                text = _free(rng, 1, lang)[0]
                 fast = k % 2 == 1
                 items.append({"kind": "line", "layout": "free", "size": "M", "text": text, "prompt_y": y + 30,
                               "speed": "fast" if fast else "normal",
@@ -151,15 +185,8 @@ def layout(kinds, seed):
     return pages
 
 
-HEADERS = {
-    "grid": "흰 칸에 한 글자씩 쓰세요. 회색 칸은 띄어쓰기라 비워 둡니다. 평소 글씨체로.",
-    "digits": "칸마다 한 글자(숫자, 기호)씩 쓰세요. 비슷한 글자는 서로 다르게 보이도록.",
-    "english": "영어는 네 줄에 맞춰 쓰세요: 소문자 몸통은 가운데 칸, g y p 꼬리는 아래 칸.",
-    "free": "줄 위에 자연스럽게 쓰세요. '빠르게' 표시가 있는 줄은 평소 메모하듯 빨리.",
-}
-
-
-def draw_pdf(pages, out, font_name, title="rmpp-practice"):
+def draw_pdf(pages, out, font_name, title="rmpp-practice", lang="ko"):
+    L = LANGS[lang]
     from reportlab.pdfgen import canvas
     c = canvas.Canvas(str(out), pagesize=(PX_W * PT, PX_H * PT))
     c.setTitle(title)
@@ -167,11 +194,11 @@ def draw_pdf(pages, out, font_name, title="rmpp-practice"):
     for pno, (kind, items) in enumerate(pages):
         c.setFillGray(0.45)
         c.setFont(font_name, 28 * PT)
-        c.drawString(MARGIN * PT, Y(70), f"{pno + 1}/{len(pages)}  {HEADERS[kind]}")
+        c.drawString(MARGIN * PT, Y(70), f"{pno + 1}/{len(pages)}  {L['headers'][kind]}")
         for it in items:
             c.setFillGray(0.0)
             size = 34
-            label = it["text"] + ("   (빠르게)" if it.get("speed") == "fast" else "")
+            label = it["text"] + (f"   ({L['fast']})" if it.get("speed") == "fast" else "")
             c.setFont(font_name, size * PT)
             c.drawString(MARGIN * PT, Y(it["prompt_y"]), label)
             x0, y0, x1, y1 = it["box"]
@@ -201,7 +228,7 @@ def draw_pdf(pages, out, font_name, title="rmpp-practice"):
     c.save()
 
 
-def sidecar(pages, seed):
+def sidecar(pages, seed, lang="ko"):
     """Template description in .rm coordinates; no personal data."""
     out = []
     n = 0
@@ -219,11 +246,12 @@ def sidecar(pages, seed):
             out.append(d)
             n += 1
     return {"format": FORMAT, "page_px": [PX_W, PX_H], "dpi": DPI, "pages": len(pages), "seed": seed,
-            "page_kinds": [k for k, _ in pages], "items": out}
+            "languages": languages(lang), "page_kinds": [k for k, _ in pages], "items": out}
 
 
-def plan_kinds(npages):
-    cycle = ["grid", "english", "grid", "digits", "free", "grid", "english", "free"]
+def plan_kinds(npages, lang="ko"):
+    cycle = (["grid", "english", "grid", "digits", "free", "grid", "english", "free"] if LANGS[lang]["cells"] else
+             ["english", "digits", "free", "english", "free", "digits", "english", "free"])
     return [cycle[i % len(cycle)] for i in range(npages)]
 
 
