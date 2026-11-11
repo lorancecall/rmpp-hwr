@@ -69,6 +69,8 @@ void loadSettings() {
     // Lasso convert: typed text (default) or a text object (ink in the language's font; v0.2's lassoInk=true).
     g_state->insert(QStringLiteral("textObject"), s.value(QStringLiteral("textObject"), s.value(QStringLiteral("lassoInk"), false)).toBool());
     g_state->insert(QStringLiteral("lassoReplace"), s.value(QStringLiteral("lassoReplace"), false).toBool());
+    // Convert to text (toolbar): into this page replacing the ink (default, as reMarkable's own convert) or on a new page
+    g_state->insert(QStringLiteral("pageReplace"), s.value(QStringLiteral("pageReplace"), true).toBool());
     const QString model = s.value(QStringLiteral("model"), QStringLiteral("deployed")).toString();
     g_state->insert(QStringLiteral("hwrModel"), model == QLatin1String("builtin") ? QStringLiteral("deployed") : model);
 }
@@ -681,7 +683,7 @@ Rectangle {
                     { key: "lang", label: "Language",
                       text: hwr.languageInUse ? hwr.languageInUse + ": " + page.modelInUseName() : "No model installed" },
                     { key: "convert", label: "Convert",
-                      text: "Page: on a new page.  Lasso: " + (hwr.textObject ? "text object" : "typed text") + "." },
+                      text: "Page: " + (hwr.pageReplace ? "into the page" : "on a new page") + ".  Lasso: " + (hwr.textObject ? "text object" : "typed text") + "." },
                     { key: "collect", label: "Collect training data",
                       text: "Save conversions: " + (hwr.collect ? "on" : "off") + ", " + (hwr.conversions || 0) + " saved." }
                 ] : []
@@ -766,8 +768,25 @@ Rectangle {
             ArkControls.Panel {
                 visible: page.sub === "convert"
                 label: "Convert to text (toolbar)"
-                description: "Recognizes the whole page and types the text on a new page after it. Your handwriting stays as it is."
+                description: hwr.pageReplace
+                    ? "Recognizes the whole page and types the text into this page, each line at the height of its handwriting; the handwriting is removed (undo brings it back)."
+                    : "Recognizes the whole page and types the text on a new page after it. Your handwriting stays as it is."
                 Layout.fillWidth: true
+            }
+            ArkControls.Panel {
+                visible: page.sub === "convert"
+                label: "Replace the handwriting"
+                description: hwr.pageReplace ? "The text goes into this page." : "The text goes on a new page."
+                Layout.fillWidth: true
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                action: ArkControls.Toggle {
+                    checked: !!hwr.pageReplace
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -20
+                        onClicked: page.send("set:pageReplace:" + (hwr.pageReplace ? "0" : "1"))
+                    }
+                }
             }
             ArkControls.Panel {
                 visible: page.sub === "convert"
@@ -1206,6 +1225,7 @@ void hwrInit() {
     g_state->insert(QStringLiteral("hwrModel"), QStringLiteral("deployed"));
     g_state->insert(QStringLiteral("textObject"), false);
     g_state->insert(QStringLiteral("lassoReplace"), false);
+    g_state->insert(QStringLiteral("pageReplace"), true);
     g_state->insert(QStringLiteral("languageInUse"), QString());
     g_state->insert(QStringLiteral("inkStyle"), QStringLiteral("own"));
     g_state->insert(QStringLiteral("hasOwnGlyphs"), false);
@@ -1216,7 +1236,10 @@ void hwrInit() {
     QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
         if (key != QLatin1String("command")) return;
         const QString cmd = v.toString().section(QLatin1Char('#'), 0, 0);
-        if (cmd == QLatin1String("page")) convertCurrentPage();
+        if (cmd == QLatin1String("page")) {
+            if (g_state->value(QStringLiteral("pageReplace")).toBool()) convertPageInPlace();
+            else convertCurrentPage();
+        }
         else if (cmd == QLatin1String("ink")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool());
         else if (cmd == QLatin1String("text")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool(), false, true);
         else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
@@ -1249,7 +1272,8 @@ void hwrInit() {
         else if (cmd.startsWith(QLatin1String("delmodel:"))) deleteModel(cmd.mid(9));
         else if (cmd.startsWith(QLatin1String("set:"))) {
             const QString name = cmd.section(QLatin1Char(':'), 1, 1);
-            if (name == QLatin1String("collect") || name == QLatin1String("textObject") || name == QLatin1String("lassoReplace"))
+            if (name == QLatin1String("collect") || name == QLatin1String("textObject") || name == QLatin1String("lassoReplace")
+                || name == QLatin1String("pageReplace"))
                 saveSetting(name, cmd.section(QLatin1Char(':'), 2, 2) == QLatin1String("1"));
         }
     });

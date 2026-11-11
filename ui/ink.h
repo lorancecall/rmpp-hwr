@@ -679,11 +679,26 @@ void showInkBusy(QQuickItem *dv) {
 // reMarkable's own lasso convert does: below the existing text with blank lines up to that height, or, when the
 // text already reaches that height, at the end of the line there. Measured on 3.29: line pitch 53.55 for the default
 // paragraph style. Strokes below the text column are anchored to it, so inserted lines push them down (as typing
-// does): kept handwriting ends up just below its text. Inserting text ends the lasso selection, so with replace the
+// does): kept handwriting ends up just below its text, and so does all handwriting further down the page. Moving
+// them back failed (moveSelectedItems after addSelectionRect does nothing; clone + delete + cloneAddAndSelectItems
+// only deletes), see exp28/exp29. Inserting text ends the lasso selection, so with replace the
 // handwriting is deleted first (one undo step each).
 constexpr double kTextLinePitch = 53.55;
 
-void putText(QPointer<QObject> scp, int layer, bool replace, const QString &text, const QRectF &sel) {
+// Selects the strokes inside a scene rect (SceneController::addSelectionRect, mode 0); false if not available.
+// Only works while the selection tool is active (tested: with the pen active it selects nothing).
+bool selectRect(QObject *sc, const QRect &r) {
+    const int m = sc->metaObject()->indexOfMethod("addSelectionRect(QRect,SceneController::LineSelectionMode)");
+    if (m < 0) return false;
+    QRect rect = r;
+    int mode = 0;
+    void *a[] = {nullptr, &rect, &mode};
+    sc->qt_metacall(QMetaObject::InvokeMetaMethod, m, a);
+    return true;
+}
+
+// lines: each recognized line with its vertical centre (scene units), top to bottom.
+void putText(QPointer<QObject> scp, int layer, bool replace, const QList<QPair<double, QString>> &lines) {
     if (replace) QMetaObject::invokeMethod(scp, "deleteSelectedItems", Q_ARG(int, layer));
     else QMetaObject::invokeMethod(scp, "clearSelectedItems");
     if (!scp->property("hasRootDocument").toBool()) QMetaObject::invokeMethod(scp, "createRootDocument");
@@ -692,26 +707,59 @@ void putText(QPointer<QObject> scp, int layer, bool replace, const QString &text
         if (!scp) { setStatus(QStringLiteral("page closed"), false); return; }
         const QRectF root = scp->property("rootDocumentBoundingRect").toRectF();
         const int len = scp->property("rootDocumentLength").toInt();
-        const double y = sel.top() + qMin(sel.height(), kTextLinePitch) / 2;   // middle of the first written line
+        auto lineOf = [&](double y) { return qMax(0, int((y - root.top()) / kTextLinePitch)); };
+        const double y = lines.first().first;   // middle of the first written line
         QString insert;
         if (len > 0 && y < root.bottom()) {
             QMetaObject::invokeMethod(scp, "setCursorPosition", Q_ARG(QPointF, QPointF(root.right() - 1, y)));
-            insert = QLatin1Char(' ') + text;
+            insert = QLatin1Char(' ') + lines.first().second;
         } else {
             const int used = len > 0 ? qMax(1, qRound(root.height() / kTextLinePitch)) : 0;   // lines in use
-            const int target = qMax(0, int((y - root.top()) / kTextLinePitch));                 // line of the selection
+            const int target = lineOf(y);                                                        // line of the handwriting
             const int newlines = used == 0 ? target : qMax(1, target - used + 1);
             QMetaObject::invokeMethod(scp, "setCursorIndex", Q_ARG(int, len));
-            insert = QString(newlines, QLatin1Char('\n')) + text;
+            insert = QString(newlines, QLatin1Char('\n')) + lines.first().second;
         }
+        // the next lines at their own heights (at least one line apart)
+        for (int i = 1; i < lines.size(); ++i)
+            insert += QString(qMax(1, lineOf(lines[i].first) - lineOf(lines[i - 1].first)), QLatin1Char('\n')) + lines[i].second;
+        QStringList texts;
+        for (const auto &l : lines) texts << l.second;
+        const QString text = texts.join(QLatin1String(" | "));
         QMetaObject::invokeMethod(scp, "replaceText", Q_ARG(QString, insert));
         QTimer::singleShot(300, scp, [=] {
             if (!scp) return;
             const bool in = scp->property("rootDocumentLength").toInt() > len;
-            qWarning("[rmpp-hwr] text: %s (%s)", qPrintable(QString(text).replace(QLatin1Char('\n'), QLatin1String(" | "))),
+            qWarning("[rmpp-hwr] text: %s (%s)", qPrintable(text),
                      in ? "inserted" : "NOT inserted");
             setStatus(in ? QString() : QStringLiteral("the text could not be inserted (undo brings the handwriting back)"), false);
         });
+    });
+}
+
+// Convert to text (toolbar) with "Replace the handwriting": select every stroke of the current layer, then convert
+// the selection to typed text in this page (deleting the strokes first), each line at its own height.
+void convertSelectionToInk(bool replace, bool editOnly, bool toText);
+void convertPageInPlace() {
+    if (g_state->value(QStringLiteral("busy")).toBool() || g_edit.box) return;
+    QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
+    QObject *sc = dv ? dv->property("sceneController").value<QObject *>() : nullptr;
+    if (!sc) return;
+    // rect selection needs the selection tool: activate it like a tap on its toolbar button
+    QQuickItem *tool = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionButton"); });
+    const bool switching = tool && !tool->property("selected").toBool();
+    if (switching) QMetaObject::invokeMethod(tool, "clicked");
+    QPointer<QObject> scp(sc);
+    QTimer::singleShot(switching ? 600 : 0, sc, [scp] {
+        if (!scp) return;
+        QMetaObject::invokeMethod(scp, "clearSelectedItems");
+        if (!selectRect(scp, QRect(-5000, -5000, 10000, 40000)))   // scene units: more than any page
+            setStatus(QStringLiteral("this xochitl version is not supported"), false);
+    });
+    QTimer::singleShot(switching ? 1100 : 500, sc, [scp] {
+        if (!scp) return;
+        if (scp->property("selectionItemCount").toInt() <= 0) { setStatus(QStringLiteral("no handwriting on this page"), false); return; }
+        convertSelectionToInk(true, false, true);
     });
 }
 
@@ -766,7 +814,14 @@ void convertSelectionToInk(bool replace, bool editOnly = false, bool toText = fa
                 lines << QStringLiteral("%1 %2 %3 %4\t%5").arg(b.left()).arg(b.top()).arg(b.right()).arg(b.bottom()).arg(l.text);
                 texts << l.text;
             }
-            if (toText) { putText(scp, layer, replace, texts.join(QLatin1Char('\n')), sel); return; }
+            if (toText) {
+                QList<QPair<double, QString>> typed;
+                for (const InkLine &l : found)
+                    if (!l.text.isEmpty()) typed.append({sel.top() + l.box.center().y() * ky, l.text});
+                std::sort(typed.begin(), typed.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+                putText(scp, layer, replace, typed);
+                return;
+            }
             qWarning("[rmpp-hwr] ink: %s", qPrintable(texts.join(QLatin1String(" | "))));
             putInk(scp, php, dvp, layer, replace, placeLines(lines, sel, replace), texts.join(QLatin1Char('\n')), -1);
         }, Qt::QueuedConnection);
