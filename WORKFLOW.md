@@ -78,7 +78,7 @@ hwr pull --keep    # same, but leave the conversions on the tablet
 
 ```
 hwr train              # upload hwr-data/collected, start retraining (name: my-YYYYMMDD-HHMM)
-hwr train my-v2        # pick the name
+hwr train my-run        # pick the name
 hwr status             # jobs and the last log lines
 ```
 
@@ -89,7 +89,7 @@ lines so nothing is forgotten), fine-tune from the current best model (or the ba
 ## 5. Check the new model
 
 ```
-hwr fetch my-v2        # download and score it
+hwr fetch my-run        # download and score it
 hwr eval               # score the model that is on the tablet now
 hwr models             # all downloaded models and their scores
 ```
@@ -100,13 +100,13 @@ used for training, so models are compared fairly. Lower is better. The base mode
 ## 6. Install it
 
 ```
-hwr deploy my-v2       # install training run my-v2 on the tablet (the old one is kept)
+hwr deploy my-run      # install training run my-run on the tablet (the old one is kept)
 hwr rollback           # go back to the previous model
 ```
 
-Each deployed model gets the next version name, `rmpp-hwr-korean-v1`, `-v2`, ...; the training run it came from
+Each deployed model gets the next version name, `rmpp-hwr-korean-v0.1`, `-v0.2`, ...; the training run it came from
 is recorded in `hwr-train/out/releases.json` (`hwr models` lists both). Settings > Handwriting > Model then shows
-"rmpp-hwr-korean-v3 (error NN%)". The base model is `rmpp-hwr-korean-base`. Only deploy a model that scores lower
+"rmpp-hwr-korean-v0.3 (error NN%)". The base model is `rmpp-hwr-korean-base`. Only deploy a model that scores lower
 than the one on the tablet.
 
 ## Status (2026-11-10)

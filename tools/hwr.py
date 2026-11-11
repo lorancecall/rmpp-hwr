@@ -12,7 +12,7 @@
   hwr status               training jobs and the last lines of the newest log
   hwr fetch NAME           download export/NAME/rec.onnx -> hwr-train/out/NAME, then eval it
   hwr eval [NAME]          error rate (CER) of a model on your eval lines; no NAME = the model on the tablet
-  hwr deploy NAME [--as V] install hwr-train/out/NAME on the tablet as the next rmpp-hwr-korean-vN
+  hwr deploy NAME [--as V] install hwr-train/out/NAME on the tablet as the next rmpp-hwr-korean-v0.N
                            (keeps the old model for rollback; versions in hwr-train/out/releases.json)
   hwr rollback             put the previous model back on the tablet
   hwr models               list downloaded models and their eval results
@@ -669,8 +669,8 @@ def cmd_uninstall(a):
 
 
 # ---- tablet model ----
-MODEL_NAME = "rmpp-hwr-korean"          # base model: rmpp-hwr-korean-base; personal models: -v1, -v2, ...
-RELEASES = OUT / "releases.json"          # {"rmpp-hwr-korean-v2": {"run": "fix3", "eval12": ..., "time": ...}}
+MODEL_NAME = "rmpp-hwr-korean"          # base model: rmpp-hwr-korean-base; personal models: -v0.1, -v0.2, ...
+RELEASES = OUT / "releases.json"          # {"rmpp-hwr-korean-v0.2": {"run": "fix3", "eval12": ..., "time": ...}}
 
 
 def releases():
@@ -678,13 +678,13 @@ def releases():
 
 
 def release_name(run_name):
-    """The version name of a training run: the one it was deployed under before, else the next free vN."""
+    """The version name of a training run: the one it was deployed under before, else the next free v0.N."""
     rel = releases()
     for k, v in rel.items():
         if v.get("run") == run_name:
             return k
-    n = max([int(k.rsplit("-v", 1)[1]) for k in rel if re.search(r"-v\d+$", k)] or [0]) + 1
-    return f"{MODEL_NAME}-v{n}"
+    n = max([int(m.group(1)) for k in rel if (m := re.search(r"-v0\.(\d+)$", k))] or [0]) + 1
+    return f"{MODEL_NAME}-v0.{n}"
 
 
 def cmd_deploy(a):
@@ -746,9 +746,9 @@ def main():
     p = sp.add_parser("status"); p.add_argument("--lines", type=int, default=3); p.set_defaults(f=cmd_status)
     p = sp.add_parser("fetch"); p.add_argument("name"); p.set_defaults(f=cmd_fetch)
     p = sp.add_parser("eval"); p.add_argument("name", nargs="?"); p.set_defaults(f=cmd_eval)
-    p = sp.add_parser("deploy", help="install a trained model on the tablet as the next rmpp-hwr-korean-vN")
+    p = sp.add_parser("deploy", help="install a trained model on the tablet as the next rmpp-hwr-korean-v0.N")
     p.add_argument("name", help="training run (hwr-train/out/NAME)")
-    p.add_argument("--as", dest="as_", help="version name to use instead of the next rmpp-hwr-korean-vN")
+    p.add_argument("--as", dest="as_", help="version name to use instead of the next rmpp-hwr-korean-v0.N")
     p.set_defaults(f=cmd_deploy)
     sp.add_parser("rollback").set_defaults(f=cmd_rollback)
     sp.add_parser("models").set_defaults(f=cmd_models)
