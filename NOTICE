@@ -1,5 +1,8 @@
 rmpp-hwr includes or downloads the following third-party components.
 
+Korean model of the releases (rec.onnx, dict.txt, model.txt; fine-tuned): see MODEL_CARD.md for its training data,
+  attributions and license (CC BY-SA 4.0).
+
 model/rec.onnx, model/dict.txt
   PaddleOCR korean_PP-OCRv5_mobile_rec, converted to ONNX (input/output dimensions renamed).
   Copyright PaddlePaddle Authors. Apache License 2.0. https://github.com/PaddlePaddle/PaddleOCR
