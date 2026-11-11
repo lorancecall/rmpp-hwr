@@ -834,7 +834,10 @@ void convertSelectionToInk(bool replace, bool editOnly = false, bool toText = fa
             if (toText) {
                 QList<QPair<double, QString>> typed;
                 for (const InkLine &l : found)
-                    if (!l.text.isEmpty()) typed.append({sel.top() + l.box.center().y() * ky, l.text});
+                    // skip empty lines and lone marks (a dot or dash recognized from a stray stroke)
+                    if (!l.text.trimmed().isEmpty() && !(l.text.trimmed().size() == 1 && !l.text.trimmed().at(0).isLetterOrNumber()))
+                        typed.append({sel.top() + l.box.center().y() * ky, l.text});
+                if (typed.isEmpty()) { setStatus(QStringLiteral("no handwriting recognized in the selection"), false); return; }
                 std::sort(typed.begin(), typed.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
                 putText(scp, layer, replace, typed);
                 return;
