@@ -703,8 +703,10 @@ def cmd_deploy(a):
     with tempfile.TemporaryDirectory() as t:
         (Path(t) / "model.txt").write_text(desc + "\n", encoding="utf-8")
         run(["scp", "-q", str(d / "rec.onnx"), str(Path(t) / "model.txt"), f"{TABLET}:{DEV_DIR}/"])
+    # keep every deployed version under models/<version>/ so Settings > Handwriting can switch between them
+    ssh(TABLET, f"cd {DEV_DIR} && mkdir -p models/{ver} && cp rec.onnx dict.txt model.txt models/{ver}/")
     restart_xochitl()   # the recognizer caches the model after first use
-    print(f"installed: {desc}")
+    print(f"installed: {desc} (also kept in {DEV_DIR}/models/{ver})")
 
 
 def backup_tablet():
