@@ -412,14 +412,22 @@ const char *kEditQml = R"QML(
 import QtQuick
 import ark.tokens as ArkTokens
 import ark.controls as ArkControls
+import xofm.libs.peninput
+Item {
+    id: shade
+    property string initial: ""
+    property var penManager: null
+    anchors.fill: parent
+    z: 10000
+    // outside the box: the pen draws nothing on the page, and a tap closes the box (cancel)
+    PenInputBlocker { anchors.fill: parent; manager: shade.penManager }
+    MouseArea { anchors.fill: parent; onClicked: hwr.command = "inkcancel#" + Date.now() }
 Rectangle {
     id: box
-    property string initial: ""
-    width: (parent ? parent.width : 1620) - 120; height: 740
+    width: shade.width - 120; height: 740
     x: 60; y: 90
-    z: 10000
     color: "white"; border.color: "black"; border.width: 3
-    MouseArea { anchors.fill: parent }   // keep taps off the page
+    MouseArea { anchors.fill: parent }   // taps inside the box stay in the box
     Text { x: 36; y: 26; text: "Edit text"; font.pixelSize: 36; font.bold: true }
     Rectangle {
         id: field
@@ -441,7 +449,7 @@ Rectangle {
                 leftPadding: 18; rightPadding: 18; topPadding: 14; bottomPadding: 14
                 font.pixelSize: 40
                 wrapMode: TextEdit.Wrap
-                text: box.initial
+                text: shade.initial
                 focus: true
                 onCursorRectangleChanged: flick.ensureVisible(cursorRectangle)
                 Component.onCompleted: { forceActiveFocus(); cursorPosition = text.length; Qt.inputMethod.show(); }
@@ -456,6 +464,7 @@ Rectangle {
             onClicked: { Qt.inputMethod.commit(); hwr.inkText = input.text; hwr.command = "inkok#" + Date.now(); }
         }
     }
+}
 }
 )QML";
 
@@ -482,7 +491,10 @@ void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, c
     auto *ctx = new QQmlContext(base);
     ctx->setContextProperty(QStringLiteral("hwr"), g_state);
     // a child of the DocumentView: hidden and destroyed with the notebook (see also closeStaleInkEdit)
-    QObject *o = createInline(eng, ctx, kEditQml, "InkEdit", dv, {{QStringLiteral("initial"), text}});
+    QObject *pin = dv->property("penInput").value<QObject *>();   // xochitl's pen input; its surface manager blocks the pen
+    QObject *mgr = pin ? pin->property("surfaceManager").value<QObject *>() : nullptr;
+    QObject *o = createInline(eng, ctx, kEditQml, "InkEdit", dv,
+                              {{QStringLiteral("initial"), text}, {QStringLiteral("penManager"), QVariant::fromValue(mgr)}});
     if (!o) { delete ctx; return; }
     ctx->setParent(o);
     g_edit = {o, sc, ph, dv, dv->property("currentPageId").toString(), rec, layer};
