@@ -47,7 +47,7 @@ const char *kPages = "/home/root/.local/share/remarkable/xochitl";
 
 const char *kConf = "/home/root/.config/rmpp-hwr/settings.conf";
 
-// busy, status, command (written by QML), settings hideNative / collect / lassoInk, info modelName / modelInfo / conversions
+// busy, status, command (written by QML), settings converter / collect / hwrModel / inkStyle, info modelName / conversions
 QQmlPropertyMap *g_state = nullptr;
 bool g_confLoaded = false;
 
@@ -57,11 +57,16 @@ void loadSettings() {
     if (g_confLoaded || !QFileInfo::exists(QStringLiteral("/home/root/.local"))) return;
     g_confLoaded = true;
     QSettings s(QLatin1String(kConf), QSettings::IniFormat);
-    g_state->insert(QStringLiteral("hideNative"), s.value(QStringLiteral("hideNative"), false).toBool());
-    g_state->insert(QStringLiteral("lassoInk"), s.value(QStringLiteral("lassoInk"), true).toBool());
+    // converter: "rmpp" (rmpp-hwr replaces reMarkable's Convert to text) or "remarkable" (rmpp-hwr changes nothing).
+    // Older settings: model=builtin meant reMarkable's converter.
+    QString conv = s.value(QStringLiteral("converter")).toString();
+    if (conv.isEmpty()) conv = s.value(QStringLiteral("model")).toString() == QLatin1String("builtin")
+        ? QStringLiteral("remarkable") : QStringLiteral("rmpp");
+    g_state->insert(QStringLiteral("converter"), conv);
     g_state->insert(QStringLiteral("inkStyle"), s.value(QStringLiteral("inkStyle"), QStringLiteral("own")).toString());
     g_state->insert(QStringLiteral("collect"), s.value(QStringLiteral("collect"), true).toBool());
-    g_state->insert(QStringLiteral("hwrModel"), s.value(QStringLiteral("model"), QStringLiteral("deployed")).toString());
+    const QString model = s.value(QStringLiteral("model"), QStringLiteral("deployed")).toString();
+    g_state->insert(QStringLiteral("hwrModel"), model == QLatin1String("builtin") ? QStringLiteral("deployed") : model);
 }
 
 void saveSetting(const QString &key, const QVariant &v) {
@@ -103,7 +108,8 @@ bool loadLib(QString *err) {
 
 // ---- models (Settings > Handwriting > Recognition) ----
 // "deployed": rec.onnx / dict.txt / model.txt in kLibDir (what `hwr deploy` and the installer write);
-// models/<folder>/ with the same three files: more models to pick from; "builtin": rmpp-hwr's recognizer is off and
+// models/<folder>/ with the same three files: more models to pick from (grouped by language). With the converter set to
+// "remarkable" the recognizer is off and
 // reMarkable's own recognizer is used. A model is named by the first line of its model.txt (else its folder).
 QString modelName(const QString &dir, const QString &fallback) {
     QFile f(dir + QStringLiteral("/model.txt"));
@@ -115,6 +121,29 @@ QString modelName(const QString &dir, const QString &fallback) {
 }
 
 struct ModelEntry { QString id, name, dir; };
+
+// Language of a model: pack.json {"language": "ko"} in its folder, else guessed from its name.
+QString modelLanguage(const QString &dir, const QString &name) {
+    QFile f(dir + QStringLiteral("/pack.json"));
+    if (f.open(QIODevice::ReadOnly)) {
+        const QString l = QJsonDocument::fromJson(f.readAll()).object().value(QStringLiteral("language")).toString();
+        if (!l.isEmpty()) return l;
+    }
+    const QString n = name.toLower();
+    if (n.contains(QLatin1String("korean")) || n.contains(QLatin1String("-ko"))) return QStringLiteral("ko");
+    if (n.contains(QLatin1String("english")) || n.contains(QLatin1String("-en"))) return QStringLiteral("en");
+    if (n.contains(QLatin1String("japan"))) return QStringLiteral("ja");
+    if (n.contains(QLatin1String("chinese"))) return QStringLiteral("zh");
+    if (n.contains(QLatin1String("latin"))) return QStringLiteral("latin");
+    return QStringLiteral("other");
+}
+
+QString languageName(const QString &code) {
+    static const QHash<QString, QString> names{{QStringLiteral("ko"), QStringLiteral("Korean (with English and digits)")},
+        {QStringLiteral("en"), QStringLiteral("English")}, {QStringLiteral("ja"), QStringLiteral("Japanese")},
+        {QStringLiteral("zh"), QStringLiteral("Chinese")}, {QStringLiteral("latin"), QStringLiteral("Latin languages")}};
+    return names.value(code, QStringLiteral("Other"));
+}
 
 QList<ModelEntry> listModels() {
     QList<ModelEntry> out;
@@ -137,14 +166,14 @@ QList<ModelEntry> listModels() {
 
 // The model directory to use now ("" = builtin). A selected model that is gone falls back to the deployed one.
 QString currentModelDir() {
+    if (g_state->value(QStringLiteral("converter")).toString() != QLatin1String("rmpp")) return QString();
     const QString sel = g_state->value(QStringLiteral("hwrModel")).toString();
-    if (sel == QLatin1String("builtin")) return QString();
     for (const ModelEntry &m : listModels())
         if (m.id == sel) return m.dir;
     return QLatin1String(kLibDir);
 }
 
-bool builtinRecognizer() { return g_state->value(QStringLiteral("hwrModel")).toString() == QLatin1String("builtin"); }
+bool builtinRecognizer() { return g_state->value(QStringLiteral("converter")).toString() != QLatin1String("rmpp"); }
 
 // Called on a worker thread while busy; a different model selected since the last load is loaded instead.
 bool loadRecognizer(QString *err) {
@@ -247,6 +276,21 @@ void refreshInfo() {
     }
     g_state->insert(QStringLiteral("hasOwnGlyphs"), QFileInfo::exists(QLatin1String(kLibDir) + QStringLiteral("/glyphs_own.json")));
     g_state->insert(QStringLiteral("modelList"), QString::fromUtf8(QJsonDocument(models).toJson(QJsonDocument::Compact)));
+    // the same models grouped by language, for the Language section
+    QJsonArray langs;
+    QStringList order;
+    QHash<QString, QJsonArray> byLang;
+    for (const QJsonValue &v : models) {
+        const QJsonObject m = v.toObject();
+        QString dir = QLatin1String(kLibDir);
+        for (const ModelEntry &e : listModels()) if (e.id == m.value(QStringLiteral("id")).toString()) dir = e.dir;
+        const QString l = modelLanguage(dir, m.value(QStringLiteral("name")).toString());
+        if (!order.contains(l)) order << l;
+        byLang[l].append(m);
+    }
+    for (const QString &l : order)
+        langs.append(QJsonObject{{QStringLiteral("code"), l}, {QStringLiteral("name"), languageName(l)}, {QStringLiteral("models"), byLang[l]}});
+    g_state->insert(QStringLiteral("languageList"), QString::fromUtf8(QJsonDocument(langs).toJson(QJsonDocument::Compact)));
     // the model in use (id as resolved: a vanished selection shows as the deployed one)
     const QString cur = currentModelDir();
     QString curId = QStringLiteral("builtin");
@@ -484,7 +528,7 @@ import xofm.libs.toolbar
 ToolbarTool {
     objectName: "rmppHwrButton"
     type: ToolbarTool.Type.FoldoutButton
-    shouldShow: toolbar.notePage && hwr.hwrModel !== "builtin"
+    shouldShow: toolbar.notePage && hwr.converter === "rmpp"
     label: hwr.busy ? "Converting…" : "Convert page"
     iconSource: "qrc:/ark/icons/hwc"
     onClicked: hwr.command = "page#" + Date.now()
@@ -495,7 +539,7 @@ ToolbarTool {
 // Hides the built-in tool while the setting is on; Binding restores xochitl's own binding when it is turned off.
 const char *kHideQml = R"QML(
 import QtQuick
-Binding { property: "visible"; value: false; when: !!hwr.hideNative }
+Binding { property: "visible"; value: false; when: hwr.converter === "rmpp" }
 )QML";
 
 const char *kSidebarQml = R"QML(
@@ -558,52 +602,112 @@ Rectangle {
                 text: "Handwriting settings"
                 Layout.fillWidth: true
             }
+
+            // ---- converter ----
             ArkControls.Panel {
-                label: "Convert page"
-                description: "Recognizes Korean, English and numbers on the current page and types the text on a new page after it."
+                label: "Handwriting converter"
+                description: hwr.converter === "rmpp"
+                    ? "rmpp-hwr: runs on this tablet with the model and language you choose below. It replaces reMarkable's Convert to text in the toolbar and the lasso menu."
+                    : "reMarkable: the built-in Convert to text. rmpp-hwr changes nothing and loads no model."
                 Layout.fillWidth: true
             }
-            ArkControls.Panel {
-                label: "Hide built-in Convert to text"
-                description: hwr.hideNative ? "Only Convert page is shown in the toolbar" : "Both Convert to text and Convert page are shown"
+            RowLayout {
+                spacing: ArkControls.Values.spacing.medium
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                ArkControls.Button {
+                    text: "rmpp-hwr"
+                    type: hwr.converter === "rmpp" ? ArkTokens.Button.primary : ArkTokens.Button.secondary
+                    onClicked: page.send("converter:rmpp")
+                }
+                ArkControls.Button {
+                    text: "reMarkable"
+                    type: hwr.converter === "rmpp" ? ArkTokens.Button.secondary : ArkTokens.Button.primary
+                    onClicked: page.send("converter:remarkable")
+                }
+            }
+
+            // ---- language and model (rmpp-hwr only) ----
+            ArkControls.Title {
+                visible: hwr.converter === "rmpp"
+                type: ArkControls.Title.Medium
+                text: "Language"
                 Layout.fillWidth: true
-                action: ArkControls.Toggle {
-                    checked: !!hwr.hideNative
-                    MouseArea {
-                        anchors.fill: parent
-                        anchors.margins: -20
-                        onClicked: page.send("set:hideNative:" + (hwr.hideNative ? "0" : "1"))
+            }
+            Repeater {
+                model: { try { return hwr.converter === "rmpp" ? JSON.parse(hwr.languageList || "[]") : []; } catch (e) { return []; } }
+                delegate: ColumnLayout {
+                    id: lang
+                    required property var modelData
+                    spacing: ArkControls.Values.spacing.small
+                    Layout.fillWidth: true
+                    ArkControls.Panel {
+                        label: lang.modelData.name
+                        description: lang.modelData.models.length + (lang.modelData.models.length === 1 ? " model" : " models")
+                                     + ". Pick the one to use; personal models are trained on your practice pages."
+                        Layout.fillWidth: true
+                    }
+                    Repeater {
+                        model: lang.modelData.models
+                        delegate: ArkControls.Panel {
+                            required property var modelData
+                            label: modelData.name
+                            description: modelData.info || ""
+                            Layout.fillWidth: true
+                            Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                            action: ArkControls.Button {
+                                text: hwr.modelInUse === modelData.id ? "In use" : "Use"
+                                enabled: hwr.modelInUse !== modelData.id
+                                type: ArkTokens.Button.secondary
+                                onClicked: page.send("model:" + modelData.id)
+                            }
+                        }
                     }
                 }
             }
+
+            // ---- what the converter does (rmpp-hwr only) ----
+            ArkControls.Title {
+                visible: hwr.converter === "rmpp"
+                type: ArkControls.Title.Medium
+                text: "Convert"
+                Layout.fillWidth: true
+            }
             ArkControls.Panel {
-                visible: !!hwr.hasOwnGlyphs
-                label: "Ink handwriting: " + (hwr.inkStyle === "own" ? "My handwriting" : "Font")
-                description: hwr.inkStyle === "own"
-                    ? "Convert to ink writes with your own characters (from your practice pages); missing ones come from the font."
-                    : "Convert to ink writes with the font (Noto Sans KR)."
+                visible: hwr.converter === "rmpp"
+                label: "Convert page (toolbar)"
+                description: "Recognizes the whole page and types the text on a new page after it."
+                Layout.fillWidth: true
+            }
+            ArkControls.Panel {
+                visible: hwr.converter === "rmpp"
+                label: "Lasso convert: ink"
+                description: "The convert button under a lasso selection writes the recognized text as ink you can move and resize. Double tap converted ink to edit its text, weight and size."
+                Layout.fillWidth: true
+            }
+
+            // ---- ink (rmpp-hwr only) ----
+            ArkControls.Title {
+                visible: hwr.converter === "rmpp"
+                type: ArkControls.Title.Medium
+                text: "Ink"
+                Layout.fillWidth: true
+            }
+            ArkControls.Panel {
+                visible: hwr.converter === "rmpp"
+                label: "Ink handwriting: " + (hwr.inkStyle === "own" && hwr.hasOwnGlyphs ? "My handwriting" : "Font (Noto Sans KR)")
+                description: hwr.hasOwnGlyphs
+                    ? (hwr.inkStyle === "own"
+                       ? "Your own characters, from your practice pages; missing ones come from the font."
+                       : "The font. Switch on to write with your own characters.")
+                    : "The font. My handwriting appears when your own glyphs (glyphs_own.json) are installed."
                 Layout.fillWidth: true
                 action: ArkControls.Toggle {
+                    visible: !!hwr.hasOwnGlyphs
                     checked: hwr.inkStyle === "own"
                     MouseArea {
                         anchors.fill: parent
                         anchors.margins: -20
                         onClicked: page.send("style:" + (hwr.inkStyle === "own" ? "font" : "own"))
-                    }
-                }
-            }
-            ArkControls.Panel {
-                label: "Lasso convert button: " + (hwr.lassoInk ? "Convert to ink" : "Convert to text (built-in)")
-                description: hwr.lassoInk
-                    ? "The convert button under a lasso selection writes the recognized text as ink you can move and resize. Double tap converted ink to edit its text."
-                    : "The convert button under a lasso selection uses reMarkable's own Convert to text."
-                Layout.fillWidth: true
-                action: ArkControls.Toggle {
-                    checked: !!hwr.lassoInk
-                    MouseArea {
-                        anchors.fill: parent
-                        anchors.margins: -20
-                        onClicked: page.send("set:lassoInk:" + (hwr.lassoInk ? "0" : "1"))
                     }
                 }
             }
@@ -702,34 +806,6 @@ Rectangle {
                 }
             }
 
-            ArkControls.Title {
-                type: ArkControls.Title.Medium
-                text: "Model"
-                Layout.fillWidth: true
-            }
-            ArkControls.Panel {
-                label: "Recognition: " + (hwr.modelName || "")
-                description: hwr.modelInUse === "builtin"
-                    ? "rmpp-hwr's recognizer is off: the lasso button is reMarkable's own Convert to text, Convert page is hidden."
-                    : "Used by Convert page and Convert to ink. Add models in models/<name>/ (rec.onnx, dict.txt, model.txt)."
-                Layout.fillWidth: true
-            }
-            Repeater {
-                model: { try { return JSON.parse(hwr.modelList || "[]").concat([{ id: "builtin", name: "Off: reMarkable built-in recognizer", info: "rmpp-hwr off: reMarkable's own Convert to text only" }]); } catch (e) { return []; } }
-                delegate: ArkControls.Panel {
-                    required property var modelData
-                    label: modelData.name
-                    description: modelData.info || ""
-                    Layout.fillWidth: true
-                    Layout.leftMargin: ArkControls.Values.margin.horizontal.large
-                    action: ArkControls.Button {
-                        text: hwr.modelInUse === modelData.id ? "In use" : "Use"
-                        enabled: hwr.modelInUse !== modelData.id
-                        type: ArkTokens.Button.secondary
-                        onClicked: page.send("model:" + modelData.id)
-                    }
-                }
-            }
         }
     }
 }
@@ -787,7 +863,7 @@ import xofm.libs.toolbar
 ToolbarTool {
     objectName: "rmppHwrDoneButton"
     type: ToolbarTool.Type.FoldoutButton
-    shouldShow: toolbar.notePage && !!hwr.textPage
+    shouldShow: toolbar.notePage && !!hwr.textPage && hwr.converter === "rmpp"
     label: hwr.textPageDone ? "Correction saved (undo)" : "Done correcting"
     iconSource: "qrc:/ark/icons/hwc"
     onClicked: hwr.command = "mark:" + (hwr.textPageDone ? "0:" : "1:") + hwr.textPage + "#" + Date.now()
@@ -951,7 +1027,7 @@ QString inkIconUrl() {
 }
 
 void tryInjectInkMenu() {
-    if (!g_state->value(QStringLiteral("lassoInk")).toBool() || builtinRecognizer()) return;   // built-in Convert to text
+    if (builtinRecognizer()) return;   // reMarkable's converter: leave its lasso button alone
     QQuickItem *menu = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionHandlerMenu"); });
     if (!menu) return;
     QQuickItem *btn = findItem(menu, [](QQuickItem *i) {
@@ -1022,9 +1098,8 @@ void hwrInit() {
     g_state->insert(QStringLiteral("busy"), false);
     g_state->insert(QStringLiteral("status"), QString());
     g_state->insert(QStringLiteral("command"), QString());
-    g_state->insert(QStringLiteral("hideNative"), false);
+    g_state->insert(QStringLiteral("converter"), QStringLiteral("rmpp"));
     g_state->insert(QStringLiteral("hwrModel"), QStringLiteral("deployed"));
-    g_state->insert(QStringLiteral("lassoInk"), true);
     g_state->insert(QStringLiteral("inkStyle"), QStringLiteral("own"));
     g_state->insert(QStringLiteral("hasOwnGlyphs"), false);
     g_state->insert(QStringLiteral("collect"), true);
@@ -1047,6 +1122,10 @@ void hwrInit() {
             markRecord(cmd.mid(7), cmd.mid(5, 1) == QLatin1String("1"));
             updateCurrentPage();
         }
+        else if (cmd.startsWith(QLatin1String("converter:"))) {
+            saveSetting(QStringLiteral("converter"), cmd.mid(10) == QLatin1String("remarkable") ? QStringLiteral("remarkable") : QStringLiteral("rmpp"));
+            refreshInfo();
+        }
         else if (cmd.startsWith(QLatin1String("style:"))) {
             saveSetting(QStringLiteral("inkStyle"), cmd.mid(6));   // glyphs reload on the next conversion
         }
@@ -1061,7 +1140,7 @@ void hwrInit() {
         }
         else if (cmd.startsWith(QLatin1String("set:"))) {
             const QString name = cmd.section(QLatin1Char(':'), 1, 1);
-            if (name == QLatin1String("hideNative") || name == QLatin1String("collect") || name == QLatin1String("lassoInk"))
+            if (name == QLatin1String("collect"))
                 saveSetting(name, cmd.section(QLatin1Char(':'), 2, 2) == QLatin1String("1"));
         }
     });
