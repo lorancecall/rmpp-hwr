@@ -774,7 +774,7 @@ Rectangle {
                 label: "Lasso convert"
                 description: hwr.textObject
                     ? "The convert button under a lasso selection writes the recognized text as a text object: ink in the language's font that you can move, resize and erase. Double tap it to edit its text, weight and size."
-                    : "The convert button under a lasso selection turns the handwriting into typed text (for now with reMarkable's converter)."
+                    : "The convert button under a lasso selection recognizes the handwriting and types the text into the page's text, on the line at the height of the handwriting."
                 Layout.fillWidth: true
             }
             ArkControls.Panel {
@@ -793,11 +793,13 @@ Rectangle {
                 }
             }
             ArkControls.Panel {
-                visible: page.sub === "convert" && !!hwr.textObject
+                visible: page.sub === "convert"
                 label: "Replace the handwriting"
                 description: hwr.lassoReplace
-                    ? "The handwriting is removed and the text object takes its place (undo brings it back)."
-                    : "The handwriting stays; the text object is written below it."
+                    ? (hwr.textObject ? "The handwriting is removed and the text object takes its place (undo brings it back)."
+                                      : "The handwriting is removed once the text is typed in (undo brings it back).")
+                    : (hwr.textObject ? "The handwriting stays; the text object is written below it."
+                                      : "The handwriting stays and moves down, below the typed text.")
                 Layout.fillWidth: true
                 Layout.leftMargin: ArkControls.Values.margin.horizontal.large
                 action: ArkControls.Toggle {
@@ -1090,8 +1092,8 @@ import QtQuick
 MouseArea {
     anchors.fill: parent
     z: 1000
-    enabled: hwr.converter === "rmpp" && !!hwr.textObject
-    onClicked: hwr.command = "ink#" + Date.now()
+    enabled: hwr.converter === "rmpp"
+    onClicked: hwr.command = (hwr.textObject ? "ink#" : "text#") + Date.now()
     // the text-object icon only while the tap is ours; the Binding restores xochitl's icon otherwise
     Binding { target: btnRef; property: "iconSource"; value: inkIcon; when: hwr.converter === "rmpp" && !!hwr.textObject }
 }
@@ -1216,6 +1218,7 @@ void hwrInit() {
         const QString cmd = v.toString().section(QLatin1Char('#'), 0, 0);
         if (cmd == QLatin1String("page")) convertCurrentPage();
         else if (cmd == QLatin1String("ink")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool());
+        else if (cmd == QLatin1String("text")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool(), false, true);
         else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
         else if (cmd == QLatin1String("inkok")) finishInkEdit(true);
         else if (cmd == QLatin1String("inkcancel")) finishInkEdit(false);

@@ -673,7 +673,50 @@ void showInkBusy(QQuickItem *dv) {
 
 // ---- the lasso menu button: edit our own ink, otherwise convert the selection ----
 // editOnly: from a double tap on the selection, which only opens the edit box for our own ink (never converts).
-void convertSelectionToInk(bool replace, bool editOnly = false) {
+// ---- typed text (lasso convert without Text object mode) ----
+// OS 3.29 keeps a page's typed text in one text column (the root document) that starts at the top of the page; it
+// cannot be placed at a free x/y. The recognized text goes to the line at the height of the selection, as
+// reMarkable's own lasso convert does: below the existing text with blank lines up to that height, or, when the
+// text already reaches that height, at the end of the line there. Measured on 3.29: line pitch 53.55 for the default
+// paragraph style. Strokes below the text column are anchored to it, so inserted lines push them down (as typing
+// does): kept handwriting ends up just below its text. Inserting text ends the lasso selection, so with replace the
+// handwriting is deleted first (one undo step each).
+constexpr double kTextLinePitch = 53.55;
+
+void putText(QPointer<QObject> scp, int layer, bool replace, const QString &text, const QRectF &sel) {
+    if (replace) QMetaObject::invokeMethod(scp, "deleteSelectedItems", Q_ARG(int, layer));
+    else QMetaObject::invokeMethod(scp, "clearSelectedItems");
+    if (!scp->property("hasRootDocument").toBool()) QMetaObject::invokeMethod(scp, "createRootDocument");
+    // the root document's properties update asynchronously
+    QTimer::singleShot(300, scp, [=] {
+        if (!scp) { setStatus(QStringLiteral("page closed"), false); return; }
+        const QRectF root = scp->property("rootDocumentBoundingRect").toRectF();
+        const int len = scp->property("rootDocumentLength").toInt();
+        const double y = sel.top() + qMin(sel.height(), kTextLinePitch) / 2;   // middle of the first written line
+        QString insert;
+        if (len > 0 && y < root.bottom()) {
+            QMetaObject::invokeMethod(scp, "setCursorPosition", Q_ARG(QPointF, QPointF(root.right() - 1, y)));
+            insert = QLatin1Char(' ') + text;
+        } else {
+            const int used = len > 0 ? qMax(1, qRound(root.height() / kTextLinePitch)) : 0;   // lines in use
+            const int target = qMax(0, int((y - root.top()) / kTextLinePitch));                 // line of the selection
+            const int newlines = used == 0 ? target : qMax(1, target - used + 1);
+            QMetaObject::invokeMethod(scp, "setCursorIndex", Q_ARG(int, len));
+            insert = QString(newlines, QLatin1Char('\n')) + text;
+        }
+        QMetaObject::invokeMethod(scp, "replaceText", Q_ARG(QString, insert));
+        QTimer::singleShot(300, scp, [=] {
+            if (!scp) return;
+            const bool in = scp->property("rootDocumentLength").toInt() > len;
+            qWarning("[rmpp-hwr] text: %s (%s)", qPrintable(QString(text).replace(QLatin1Char('\n'), QLatin1String(" | "))),
+                     in ? "inserted" : "NOT inserted");
+            setStatus(in ? QString() : QStringLiteral("the text could not be inserted (undo brings the handwriting back)"), false);
+        });
+    });
+}
+
+// toText: typed text into the page's text column (see putText); otherwise a text object (ink).
+void convertSelectionToInk(bool replace, bool editOnly = false, bool toText = false) {
     if (g_state->value(QStringLiteral("busy")).toBool() || g_edit.box) return;
     if (editOnly && builtinRecognizer()) return;
     QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
@@ -684,7 +727,7 @@ void convertSelectionToInk(bool replace, bool editOnly = false) {
     const int layer = sc->property("currentLayer").toInt();
     const QRectF sel = selectionRect(sc, layer);
     if (sel.isEmpty()) { setStatus(QStringLiteral("select handwriting with the lasso first"), false); return; }
-    if (!loadGlyphs()) { setStatus(QStringLiteral("glyphs.json missing"), false); return; }
+    if (!toText && !loadGlyphs()) { setStatus(QStringLiteral("glyphs.json missing"), false); return; }
     const QString pageId = dv->property("currentPageId").toString();
     const QJsonArray recs = readInkRecords();
     const int rec = findInkRecord(recs, pageId, sc->property("selectionItemCount").toInt(), sel);
@@ -723,6 +766,7 @@ void convertSelectionToInk(bool replace, bool editOnly = false) {
                 lines << QStringLiteral("%1 %2 %3 %4\t%5").arg(b.left()).arg(b.top()).arg(b.right()).arg(b.bottom()).arg(l.text);
                 texts << l.text;
             }
+            if (toText) { putText(scp, layer, replace, texts.join(QLatin1Char('\n')), sel); return; }
             qWarning("[rmpp-hwr] ink: %s", qPrintable(texts.join(QLatin1String(" | "))));
             putInk(scp, php, dvp, layer, replace, placeLines(lines, sel, replace), texts.join(QLatin1Char('\n')), -1);
         }, Qt::QueuedConnection);
