@@ -69,8 +69,9 @@ void loadSettings() {
     // Lasso convert: typed text (default) or a text object (ink in the language's font; v0.2's lassoInk=true).
     g_state->insert(QStringLiteral("textObject"), s.value(QStringLiteral("textObject"), s.value(QStringLiteral("lassoInk"), false)).toBool());
     g_state->insert(QStringLiteral("lassoReplace"), s.value(QStringLiteral("lassoReplace"), false).toBool());
-    // Convert to text (toolbar): into this page replacing the ink (default, as reMarkable's own convert) or on a new page
-    g_state->insert(QStringLiteral("pageReplace"), s.value(QStringLiteral("pageReplace"), true).toBool());
+    // Convert to text (toolbar): on a new page after this one (default: reMarkable's own convert does that, checked
+    // 2026-11-11) or into this page, replacing the ink
+    g_state->insert(QStringLiteral("pageReplace"), s.value(QStringLiteral("pageReplace"), false).toBool());
     const QString model = s.value(QStringLiteral("model"), QStringLiteral("deployed")).toString();
     g_state->insert(QStringLiteral("hwrModel"), model == QLatin1String("builtin") ? QStringLiteral("deployed") : model);
 }
@@ -1225,7 +1226,7 @@ void hwrInit() {
     g_state->insert(QStringLiteral("hwrModel"), QStringLiteral("deployed"));
     g_state->insert(QStringLiteral("textObject"), false);
     g_state->insert(QStringLiteral("lassoReplace"), false);
-    g_state->insert(QStringLiteral("pageReplace"), true);
+    g_state->insert(QStringLiteral("pageReplace"), false);
     g_state->insert(QStringLiteral("languageInUse"), QString());
     g_state->insert(QStringLiteral("inkStyle"), QStringLiteral("own"));
     g_state->insert(QStringLiteral("hasOwnGlyphs"), false);

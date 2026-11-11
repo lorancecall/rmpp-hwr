@@ -740,26 +740,43 @@ void putText(QPointer<QObject> scp, int layer, bool replace, const QList<QPair<d
 // Convert to text (toolbar) with "Replace the handwriting": select every stroke of the current layer, then convert
 // the selection to typed text in this page (deleting the strokes first), each line at its own height.
 void convertSelectionToInk(bool replace, bool editOnly, bool toText);
+// A tap on an item through its window (emitting the tool's clicked() does not switch tools; a tap does, exp30).
+void tapItem(QQuickItem *item) {
+    QQuickWindow *win = item ? item->window() : nullptr;
+    if (!win) return;
+    const QPointF c(item->width() / 2, item->height() / 2);
+    const QPointF p = item->mapToScene(c), g = item->mapToGlobal(c);
+    QMouseEvent press(QEvent::MouseButtonPress, p, p, g, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, p, p, g, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(win, &press);
+    QCoreApplication::sendEvent(win, &release);
+}
+
 void convertPageInPlace() {
     if (g_state->value(QStringLiteral("busy")).toBool() || g_edit.box) return;
     QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
     QObject *sc = dv ? dv->property("sceneController").value<QObject *>() : nullptr;
     if (!sc) return;
-    // rect selection needs the selection tool: activate it like a tap on its toolbar button
-    QQuickItem *tool = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionButton"); });
-    const bool switching = tool && !tool->property("selected").toBool();
-    if (switching) QMetaObject::invokeMethod(tool, "clicked");
+    // close the toolbar menu the button sits in, then make the selection tool active (rect selection needs it)
+    if (QQuickItem *sv = findItem(dv, [](QQuickItem *i) { return i->metaObject()->indexOfSignal("closeToolbarFoldout()") >= 0; }))
+        QMetaObject::invokeMethod(sv, "closeToolbarFoldout");
     QPointer<QObject> scp(sc);
-    QTimer::singleShot(switching ? 600 : 0, sc, [scp] {
-        if (!scp) return;
-        QMetaObject::invokeMethod(scp, "clearSelectedItems");
-        if (!selectRect(scp, QRect(-5000, -5000, 10000, 40000)))   // scene units: more than any page
-            setStatus(QStringLiteral("this xochitl version is not supported"), false);
-    });
-    QTimer::singleShot(switching ? 1100 : 500, sc, [scp] {
-        if (!scp) return;
-        if (scp->property("selectionItemCount").toInt() <= 0) { setStatus(QStringLiteral("no handwriting on this page"), false); return; }
-        convertSelectionToInk(true, false, true);
+    QTimer::singleShot(400, sc, [scp] {
+        QQuickItem *tool = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionButton"); });
+        if (tool && !tool->property("selected").toBool()) tapItem(tool);
+        QTimer::singleShot(600, scp, [scp] {
+            if (!scp) return;
+            QMetaObject::invokeMethod(scp, "clearSelectedItems");
+            if (!selectRect(scp, QRect(-5000, -5000, 10000, 40000))) {   // scene units: more than any page
+                setStatus(QStringLiteral("this xochitl version is not supported"), false);
+                return;
+            }
+            QTimer::singleShot(500, scp, [scp] {
+                if (!scp) return;
+                if (scp->property("selectionItemCount").toInt() <= 0) { setStatus(QStringLiteral("no handwriting on this page"), false); return; }
+                convertSelectionToInk(true, false, true);
+            });
+        });
     });
 }
 
