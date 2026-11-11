@@ -122,30 +122,104 @@ QRectF selectionRect(QObject *sc, int layer) {
     return r;
 }
 
-// Recognizer with rmpp_hwr_region. A separate copy (librmpp_hwr_ink.so) so the prototype does not replace the
-// recognizer that Convert page uses; once rmpp_hwr_region is in the released librmpp_hwr.so this can use g_hwr.
-struct InkRec {
-    void *rec = nullptr;
-    int (*region)(const void *, const char *, float, float, float, float, char *, size_t) = nullptr;
-};
-InkRec g_inkRec;
-
-bool loadInkRecognizer(QString *err) {
-    if (g_inkRec.rec) return true;
-    void *lib = nullptr;
-    for (const char *name : {"/librmpp_hwr_ink.so", "/librmpp_hwr.so"}) {
-        lib = dlopen((QByteArray(kLibDir) + name).constData(), RTLD_NOW | RTLD_LOCAL);
-        if (lib && dlsym(lib, "rmpp_hwr_region")) break;
-        lib = nullptr;
-    }
-    if (!lib) { *err = QStringLiteral("recognizer without rmpp_hwr_region"); return false; }
-    auto open = reinterpret_cast<void *(*)(const char *)>(dlsym(lib, "rmpp_hwr_open"));
-    g_inkRec.region = reinterpret_cast<decltype(g_inkRec.region)>(dlsym(lib, "rmpp_hwr_region"));
-    g_inkRec.rec = open ? open(kLibDir) : nullptr;
-    if (!g_inkRec.rec) { *err = QStringLiteral("model failed to load"); return false; }
-    return true;
+// ---- recognizing the selection from xochitl's own rendering of it ----
+// The lasso's SelectionImage item holds the selected ink as an image at page scale (image() -> QImage, ARGB, ink in
+// the alpha channel, same size as the selection bounds). Recognizing from it needs no saved page file: it includes
+// strokes written a moment ago, and it is right on pages whose strokes are stored relative to typed text.
+QImage selectionImage() {
+    QQuickItem *img = findAnywhere([](QQuickItem *i) { return qstrcmp(i->metaObject()->className(), "SelectionImage") == 0 && i->isVisible(); });
+    QImage im;
+    if (img) QMetaObject::invokeMethod(img, "image", Qt::DirectConnection, Q_RETURN_ARG(QImage, im));
+    return im;
 }
 
+struct InkLine {
+    QRect box;      // in image pixels
+    QString text;
+};
+
+// Split the ink into text lines like page.rs split_lines (connected components instead of strokes), render each line
+// black on white with a 12 px margin and recognize it. Runs on a worker thread.
+QList<InkLine> recognizeImage(const QImage &src) {
+    QList<InkLine> out;
+    if (src.isNull() || !g_hwr.recognize) return out;
+    const QImage im = src.convertToFormat(QImage::Format_ARGB32);
+    const int W = im.width(), H = im.height();
+    std::vector<int> label(size_t(W) * H, -1);
+    auto ink = [&](int x, int y) { return qAlpha(im.pixel(x, y)) > 60; };
+    QList<QRect> comps;
+    std::vector<int> stack;
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            if (label[size_t(y) * W + x] >= 0 || !ink(x, y)) continue;
+            const int id = int(comps.size());
+            QRect r(x, y, 1, 1);
+            stack.assign(1, y * W + x);
+            label[size_t(y) * W + x] = id;
+            while (!stack.empty()) {
+                const int p = stack.back();
+                stack.pop_back();
+                const int px = p % W, py = p / W;
+                r = r.united(QRect(px, py, 1, 1));
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int nx = px + dx, ny = py + dy;
+                        if (nx < 0 || ny < 0 || nx >= W || ny >= H || label[size_t(ny) * W + nx] >= 0 || !ink(nx, ny)) continue;
+                        label[size_t(ny) * W + nx] = id;
+                        stack.push_back(ny * W + nx);
+                    }
+            }
+            comps.append(r);
+        }
+    if (comps.isEmpty()) return out;
+    // group into lines (port of split_lines in src/page.rs)
+    QList<int> heights;
+    for (const QRect &r : comps) if (r.height() > 2) heights << r.height();
+    if (heights.isEmpty()) return out;
+    std::sort(heights.begin(), heights.end());
+    const double median = qMax(10, heights[heights.size() / 2]);
+    const double tol = median * 0.3;
+    QList<int> order;
+    for (int i = 0; i < comps.size(); ++i) order << i;
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return comps[a].center().y() < comps[b].center().y(); });
+    auto small = [&](int i) { return comps[i].height() < median * 0.35 && comps[i].width() < median * 0.6; };
+    struct L { QList<int> ids; double y0, y1; };
+    QList<L> lines;
+    for (int i : order) {
+        if (small(i)) continue;
+        const QRect &b = comps[i];
+        const double cy = (b.top() + b.bottom()) / 2.0;
+        auto it = std::find_if(lines.begin(), lines.end(), [&](const L &l) { return cy >= l.y0 - tol && cy <= l.y1 + tol; });
+        if (it != lines.end()) { it->y0 = qMin(it->y0, double(b.top())); it->y1 = qMax(it->y1, double(b.bottom())); it->ids << i; }
+        else lines.append(L{{i}, double(b.top()), double(b.bottom())});
+    }
+    for (int i : order) {
+        if (!small(i)) continue;
+        const double cy = (comps[i].top() + comps[i].bottom()) / 2.0;
+        auto dist = [&](const L &l) { return cy < l.y0 ? l.y0 - cy : (cy > l.y1 ? cy - l.y1 : 0.0); };
+        auto best = std::min_element(lines.begin(), lines.end(), [&](const L &a, const L &b) { return dist(a) < dist(b); });
+        if (best != lines.end() && dist(*best) < median) best->ids << i;
+        else lines.append(L{{i}, double(comps[i].top()), double(comps[i].bottom())});
+    }
+    std::sort(lines.begin(), lines.end(), [](const L &a, const L &b) { return a.y0 < b.y0; });
+    for (const L &l : lines) {
+        QRect box;
+        for (int i : l.ids) box = box.united(comps[i]);
+        const int pad = 12;
+        QImage g(box.width() + 2 * pad, box.height() + 2 * pad, QImage::Format_Grayscale8);
+        g.fill(255);
+        QSet<int> ids(l.ids.begin(), l.ids.end());
+        for (int y = box.top(); y <= box.bottom(); ++y)
+            for (int x = box.left(); x <= box.right(); ++x)
+                if (ids.contains(label[size_t(y) * W + x])) g.setPixel(x - box.left() + pad, y - box.top() + pad, qRgb(0, 0, 0));
+        QByteArray txt(4096, '\0');
+        float conf = 0;
+        if (g_hwr.recognize(g_hwr.rec, g.constBits(), unsigned(g.width()), unsigned(g.height()), unsigned(g.bytesPerLine()),
+                            txt.data(), txt.size(), &conf) > 0)
+            out.append(InkLine{box, QString::fromUtf8(txt.constData()).trimmed()});
+    }
+    return out;
+}
 
 // ---- placing text ----
 struct Placed {
@@ -316,7 +390,7 @@ void putInk(QPointer<QObject> scp, QPointer<QObject> php, QPointer<QQuickItem> d
         const int added = addInkStrokes(scp, php, pl.strokes, pl.em);
         if (added > 0) {
             selectInk(scp, pl.strokes);
-            recordInk(scp, scp->property("pageId").toString(), text, pl, added, replaceIdx);
+            recordInk(scp, dvp ? dvp->property("currentPageId").toString() : scp->property("pageId").toString(), text, pl, added, replaceIdx);
         }
         // lines added this way are not drawn until the next redraw (updateAfterStroke is what the pen path calls);
         // repeat once the lasso menu has closed, which repaints the old screen content
@@ -400,17 +474,24 @@ void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, c
     if (!eng || !base || !dv->window()) return;
     auto *ctx = new QQmlContext(base);
     ctx->setContextProperty(QStringLiteral("hwr"), g_state);
-    QObject *o = createInline(eng, ctx, kEditQml, "InkEdit", dv->window()->contentItem(),
-                              {{QStringLiteral("initial"), text}});
+    // a child of the DocumentView: hidden and destroyed with the notebook (see also closeStaleInkEdit)
+    QObject *o = createInline(eng, ctx, kEditQml, "InkEdit", dv, {{QStringLiteral("initial"), text}});
     if (!o) { delete ctx; return; }
     ctx->setParent(o);
-    g_edit = {o, sc, ph, dv, sc->property("pageId").toString(), rec, layer};
+    g_edit = {o, sc, ph, dv, dv->property("currentPageId").toString(), rec, layer};
+}
+
+// Called from the 1.5 s timer: the notebook was closed or the page turned while the edit box was open.
+void closeStaleInkEdit() {
+    if (!g_edit.box) return;
+    if (!g_edit.dv || !g_edit.dv->isVisible() || !g_edit.sc || g_edit.dv->property("currentPageId").toString() != g_edit.page)
+        closeInkEdit();
 }
 
 void finishInkEdit(bool ok) {
     const InkEdit e = g_edit;
     closeInkEdit();
-    if (!ok || !e.sc || !e.ph || e.sc->property("pageId").toString() != e.page) return;
+    if (!ok || !e.sc || !e.ph || !e.dv || e.dv->property("currentPageId").toString() != e.page) return;
     const QString text = g_state->value(QStringLiteral("inkText")).toString().trimmed();
     const QJsonArray recs = readInkRecords();
     if (e.rec < 0 || e.rec >= recs.size()) return;
@@ -450,12 +531,13 @@ void showInkBusy(QQuickItem *dv) {
     if (g_inkBusy) g_inkBusy->deleteLater();
     QQmlEngine *eng = qmlEngine(dv);
     QQmlContext *ctx = qmlContext(dv);
-    g_inkBusy = (eng && ctx && dv->window()) ? createInline(eng, ctx, kBusyQml, "InkBusy", dv->window()->contentItem()) : nullptr;
+    g_inkBusy = (eng && ctx) ? createInline(eng, ctx, kBusyQml, "InkBusy", dv) : nullptr;
 }
 
 // ---- the lasso menu button: edit our own ink, otherwise convert the selection ----
-void convertSelectionToInk(bool replace) {
-    if (g_state->value(QStringLiteral("busy")).toBool()) return;
+// editOnly: from a double tap on the selection, which only opens the edit box for our own ink (never converts).
+void convertSelectionToInk(bool replace, bool editOnly = false) {
+    if (g_state->value(QStringLiteral("busy")).toBool() || g_edit.box) return;
     QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
     QObject *sc = dv ? dv->property("sceneController").value<QObject *>() : nullptr;
     QObject *ph = dv ? dv->property("penHandler").value<QObject *>() : nullptr;
@@ -465,33 +547,41 @@ void convertSelectionToInk(bool replace) {
     const QRectF sel = selectionRect(sc, layer);
     if (sel.isEmpty()) { setStatus(QStringLiteral("select handwriting with the lasso first"), false); return; }
     if (!loadGlyphs()) { setStatus(QStringLiteral("glyphs.json missing"), false); return; }
-    const QString pageId = sc->property("pageId").toString();
+    const QString pageId = dv->property("currentPageId").toString();
     const QJsonArray recs = readInkRecords();
     const int rec = findInkRecord(recs, pageId, sc->property("selectionItemCount").toInt(), sel);
     if (rec >= 0) {
         openInkEdit(dv, sc, ph, layer, rec, recs[rec].toObject().value(QStringLiteral("text")).toString());
         return;
     }
-    const QString path = QStringLiteral("%1/%2/%3.rm").arg(QLatin1String(kPages), doc->property("id").toString(), pageId);
+    if (editOnly) return;
+    const QImage img = selectionImage();
+    if (img.isNull()) { setStatus(QStringLiteral("no selection image"), false); return; }
     setStatus(QStringLiteral("Converting…"), true);
     showInkBusy(dv);
     QPointer<QObject> scp(sc), php(ph);
     QPointer<QQuickItem> dvp(dv);
     std::thread([=] {
         QString err;
-        QByteArray out(64 * 1024, '\0');
-        int n = -1;
-        if (loadInkRecognizer(&err))
-            n = g_inkRec.region(g_inkRec.rec, path.toUtf8().constData(), float(sel.left()), float(sel.top()),
-                                float(sel.right()), float(sel.bottom()), out.data(), out.size());
-        const QStringList lines = QString::fromUtf8(out.constData()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        QList<InkLine> found;
+        if (loadRecognizer(&err)) {
+            if (!g_hwr.recognize) err = QStringLiteral("recognizer without rmpp_hwr_recognize");
+            else found = recognizeImage(img);
+        }
         QMetaObject::invokeMethod(qApp, [=] {
             if (!err.isEmpty()) { setStatus(err, false); return; }
             if (!scp || !php) { setStatus(QStringLiteral("page closed"), false); return; }
-            if (n <= 0) { setStatus(QStringLiteral("no handwriting recognized in the selection"), false); return; }
-            qWarning("[rmpp-hwr] ink: %s", qPrintable(lines.join(QLatin1String(" | "))));
-            QStringList texts;
-            for (const QString &l : lines) texts << l.section(QLatin1Char('\t'), 1);
+            if (found.isEmpty()) { setStatus(QStringLiteral("no handwriting recognized in the selection"), false); return; }
+            // image pixels -> page units (the image covers the selection bounds)
+            const double kx = sel.width() / img.width(), ky = sel.height() / img.height();
+            QStringList lines, texts;
+            for (const InkLine &l : found) {
+                if (l.text.isEmpty()) continue;
+                const QRectF b(sel.left() + l.box.left() * kx, sel.top() + l.box.top() * ky, l.box.width() * kx, l.box.height() * ky);
+                lines << QStringLiteral("%1 %2 %3 %4\t%5").arg(b.left()).arg(b.top()).arg(b.right()).arg(b.bottom()).arg(l.text);
+                texts << l.text;
+            }
+            qWarning("[rmpp-hwr] ink: %s", qPrintable(texts.join(QLatin1String(" | "))));
             putInk(scp, php, dvp, layer, replace, placeLines(lines, sel, replace), texts.join(QLatin1Char('\n')), -1);
         }, Qt::QueuedConnection);
     }).detach();

@@ -3,6 +3,7 @@
 // current page file, recognizes it with librmpp_hwr.so (Rust, loaded only on first use), adds a page after the
 // current one and types the text there.
 #include <dlfcn.h>
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <functional>
@@ -73,6 +74,7 @@ struct Hwr {
     void *(*open)(const char *) = nullptr;
     int (*page)(const void *, const char *, char *, size_t) = nullptr;
     int (*text)(const char *, char *, size_t) = nullptr;
+    int (*recognize)(const void *, const unsigned char *, unsigned, unsigned, unsigned, char *, size_t, float *) = nullptr;
 };
 Hwr g_hwr;
 
@@ -84,6 +86,7 @@ bool loadLib(QString *err) {
     g_hwr.open = reinterpret_cast<void *(*)(const char *)>(dlsym(g_hwr.lib, "rmpp_hwr_open"));
     g_hwr.page = reinterpret_cast<int (*)(const void *, const char *, char *, size_t)>(dlsym(g_hwr.lib, "rmpp_hwr_page"));
     g_hwr.text = reinterpret_cast<int (*)(const char *, char *, size_t)>(dlsym(g_hwr.lib, "rmpp_hwr_text"));
+    g_hwr.recognize = reinterpret_cast<decltype(g_hwr.recognize)>(dlsym(g_hwr.lib, "rmpp_hwr_recognize"));
     return true;
 }
 
@@ -866,6 +869,23 @@ void watchSelection() {
     QMetaObject::connect(sc, sig, hook, QObject::staticMetaObject.methodCount(), Qt::DirectConnection, nullptr);
 }
 
+// Double tap on a lasso selection of converted ink opens the edit box: the selection handler's drag area emits
+// doubleClicked (pen and finger). Hooked once per area.
+void watchDoubleTap() {
+    QQuickItem *h = findAnywhere([](QQuickItem *i) { return classStarts(i, "SceneSelectionHandler"); });
+    if (!h) return;
+    for (QQuickItem *k : h->childItems()) {
+        if (!k->inherits("QQuickMouseArea") || k->property("_rmppHwrTap").toBool()) continue;
+        const int sig = k->metaObject()->indexOfSignal("doubleClicked(QQuickMouseEvent*)");
+        if (sig < 0) continue;
+        k->setProperty("_rmppHwrTap", true);
+        auto *hook = new SignalHook;
+        hook->setParent(k);
+        hook->fn = [] { QTimer::singleShot(0, qApp, [] { convertSelectionToInk(false, true); }); };
+        QMetaObject::connect(k, sig, hook, QObject::staticMetaObject.methodCount(), Qt::DirectConnection, nullptr);
+    }
+}
+
 void hwrInit() {
     auto *app = QCoreApplication::instance();
     g_state = new QQmlPropertyMap(app);
@@ -898,7 +918,7 @@ void hwrInit() {
         }
     });
     auto *t = new QTimer(app);
-    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); updateCurrentPage(); watchCmdFile(); });
+    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage(); watchCmdFile(); });
     t->start(1500);
     qWarning("[rmpp-hwr] loaded");
 }

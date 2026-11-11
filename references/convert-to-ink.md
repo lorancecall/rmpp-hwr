@@ -17,6 +17,23 @@ Verified: strokes added live via `addDrawingLine`; saved to the `.rm`; selection
 first selection; immediate redraw. Not yet verified: undo of the added ink (each stroke should be its own undo step:
 untested), `ink:replace` (deleteSelectedItems), pages with several layers, zoomed/landscape views, PDF/EPUB pages.
 
+### Recognition source (changed 2026-11-11): the selection image, not the page file
+
+Reading the saved `.rm` failed in two ways: xochitl stores a page only when leaving it or on a delayed timer
+(strokes written minutes ago were missing), and on pages with typed text the strokes in the file are positioned
+relative to the text, so file and scene coordinates differ. Now the add-on takes xochitl's own rendering of the
+selection: the lasso's `SelectionImage` item has `image()` (QImage, ARGB, ink in alpha, exactly the selection bounds
+at page scale). Connected components are grouped into lines like `split_lines` in `src/page.rs`, each line is drawn
+black on white with a 12 px margin and recognized with `rmpp_hwr_recognize` of the installed `librmpp_hwr.so`
+(no separate library copy needed). `QQuickItem::grabToImage()` on that item crashed xochitl once; do not use it.
+The page id comes from `DocumentView.currentPageId` (as in Convert page).
+
+### Double tap
+
+The selection handler's drag `MouseArea` emits `doubleClicked` for pen and finger; a double tap on a selection of
+converted ink opens the edit box (on other selections it does nothing). Flipped or rotated ink no longer matches its
+record (aspect ratio) and stays plain ink.
+
 ## 1. How ink gets into a live page
 
 ### xochitl internals used (no headers; found by walking meta-objects from the open `DocumentView`)
