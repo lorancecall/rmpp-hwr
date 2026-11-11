@@ -6,7 +6,7 @@ Goal: after recognition, put the recognized text back on the page as ordinary pe
 movable, erasable ink object that looks like handwriting) instead of reMarkable's typed text layer, starting from a
 lasso selection.
 
-## Status (prototype, branch `feature/convert-to-ink`, tested on OS 3.29.1)
+## Status (release 0.2.0 candidate, tested on OS 3.29.1)
 
 Works on the tablet: lasso-select handwriting -> the lasso menu's convert button (now a pen-tip icon) -> the selection
 is recognized (`rmpp_hwr_region`) and the text is written below it as ballpoint strokes, one line per recognized line,
@@ -134,8 +134,11 @@ Converted text is drawn with the Fineliner (even width), black, thickness = em /
   4-7 selection + add, 8 lasso menu tree, 9 redraw).
 - `src/lib.rs`: `rmpp_hwr_region(rec, path, x0, y0, x1, y1, out, len)`: recognize the strokes whose box centre is in
   the rectangle; output `x0 y0 x1 y1<TAB>text` per line.
-- Tablet: `glyphs.json` and `librmpp_hwr_ink.so` (a copy of the recognizer with `rmpp_hwr_region`, so the released
-  `librmpp_hwr.so` stays untouched) in `/home/root/.local/share/rmpp-hwr/`.
+- Tablet: `glyphs.json` (release asset, installed by `rmpp-install.sh` / `hwr install`), `ink.json` (records) and
+  `ink_convert.svg` (icon) in `/home/root/.local/share/rmpp-hwr/`. The prototype's `rmpp_hwr_region` and its separate
+  library copy are gone (recognition uses the selection image and `rmpp_hwr_recognize`).
+- Developer tools (`probe`, the `load` experiment loader, `ink` commands via the `cmd` file) are only compiled with
+  `DEV=1 ui/build.sh`; release builds do not contain them.
 
 ## 4. Limits and plan
 

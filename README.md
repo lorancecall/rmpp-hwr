@@ -3,6 +3,15 @@
 Handwriting recognition (Korean, English, digits) for the reMarkable Paper Pro, running on the tablet's CPU,
 plus the tools to collect your own handwriting and train a personal model.
 
+On the tablet:
+
+- **Convert to ink** (lasso menu): select handwriting with the lasso and tap the convert button (the "aa" icon in a
+  dashed box). The recognized text is written below the selection as ordinary pen strokes (Fineliner, clean
+  Noto Sans KR glyphs), already selected so you can move or resize it at once. Double tap it (or tap the button
+  again) to **edit the text** in a keyboard box (Korean works with rmpp-korean); OK redraws it in place, wrapped at
+  its width. Settings > Handwriting switches the lasso button back to reMarkable's own Convert to text.
+- **Convert page** (toolbar, next to Convert to text): recognizes the whole page and types it on a new page.
+
 > Status: experimental. rmpp-hwr is installed and updated with its own PC tool (`hwr install`), not as a Vellum
 > package, because models change often. It only needs `rmpp-preload` from
 > [rmpp-packages](https://github.com/lorancecall/rmpp-packages) on the tablet.
@@ -12,7 +21,8 @@ plus the tools to collect your own handwriting and train a personal model.
 | Path | What |
 |---|---|
 | `src/` | Rust recognizer: reads `.rm` pages, renders lines, runs the PaddleOCR PP-OCRv5 Korean recognition model (ONNX, onnxruntime). Also exports the typed text of a page. |
-| `ui/` | xochitl add-on (LD_PRELOAD): "Convert page" in the toolbar, Settings > Handwriting (records, corrections, model info). |
+| `ui/` | xochitl add-on (LD_PRELOAD): lasso Convert to ink and text editing (`ui/ink.h`), "Convert page" in the toolbar, Settings > Handwriting (records, corrections, model info). `ui/exp/`: experiments for the developer loader (`DEV=1 ui/build.sh`). |
+| `ink/` | `glyphs.py`: builds `glyphs.json` (text -> pen strokes) from the centre lines of Noto Sans KR (OFL, see NOTICE). |
 | `model/` | base model `rec.onnx` + `dict.txt` (PaddleOCR `korean_PP-OCRv5_mobile_rec`, Apache-2.0, see NOTICE). |
 | `collect/` | practice notebooks (v1 lines, v2 structured pages with per-character cells), pulling handwriting from the tablet, line/character images. |
 | `tools/hwr` | one command for the whole loop: `practice`, `pull`, `qc`, `upload`, `train`, `fetch`, `eval`, `deploy`, `contribute`, ... |
@@ -24,6 +34,8 @@ plus the tools to collect your own handwriting and train a personal model.
 - [WORKFLOW.md](WORKFLOW.md): from practice notebook to personal model on the tablet.
 - [train/README.md](train/README.md): training backends (`.env`: local GPU or Slurm), jobs, known pitfalls.
 - [references/README.md](references/README.md): what to try next and why.
+- [references/convert-to-ink.md](references/convert-to-ink.md): how Convert to ink works inside xochitl (findings,
+  internals used, limits).
 - Open dataset: [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db) (Korean guide:
   https://lorancecall.github.io/rmpp-hwr-db/). `hwr contribute` shares structured practice pages, anonymized.
 
@@ -46,7 +58,8 @@ a reMarkable OS update. `hwr uninstall [--purge]` removes it.
 
 Building from source needs the Arm GNU aarch64 toolchain, Qt 6.10 headers/device libs and onnxruntime for
 linux-aarch64 in `../sdk` (see `.cargo/config.toml` and `ui/build.sh`):
-`ui/build.sh` and `cargo build --release --target aarch64-unknown-linux-gnu`.
+`./build.sh` (or `ui/build.sh` and `cargo build --release --target aarch64-unknown-linux-gnu`), and
+`python ink/glyphs.py build -o build/glyphs.json` (about 90 s; downloads Noto Sans KR the first time).
 
 ## Privacy
 

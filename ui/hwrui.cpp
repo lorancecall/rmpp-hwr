@@ -722,7 +722,12 @@ void tryInject() {
     qWarning("[rmpp-hwr] button added in %s", box->metaObject()->className());
 }
 
-// ---- developer probe: dump the meta-objects reachable from the open DocumentView ----
+// ---- developer tools (only in dev builds: ui/build.sh with DEV=1) ----
+// Trigger by writing a command to /home/root/.local/share/rmpp-hwr/cmd over SSH:
+//   probe                 dump the meta-objects reachable from the open DocumentView to probe.txt
+//   load <path.so> [arg]  dlopen an experiment (ui/exp) and call its rmpp_exp(arg), without restarting xochitl
+//   ink | ink:replace     convert the lasso selection
+#ifdef RMPP_HWR_DEV
 // Trigger: echo probe > /home/root/.local/share/rmpp-hwr/cmd   (output: probe.txt next to it)
 void probeObject(QObject *o, int depth, QSet<QObject *> &seen, QSet<QByteArray> &classes, QTextStream &out,
                  const QString &path) {
@@ -797,6 +802,7 @@ void devCommand(const QString &cmd) {
         fn(cmd.section(QLatin1Char(' '), 2).toUtf8().constData());
     }
 }
+#endif // RMPP_HWR_DEV
 
 // Lasso menu (cut / copy / convert / delete): the convert button converts the selection to ink instead of text.
 // A MouseArea on top of xochitl's button takes the tap; the icon becomes a pen tip.
@@ -936,7 +942,11 @@ void hwrInit() {
         }
     });
     auto *t = new QTimer(app);
-    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage(); watchCmdFile(); });
+    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage();
+#ifdef RMPP_HWR_DEV
+        watchCmdFile();
+#endif
+    });
     t->start(1500);
     qWarning("[rmpp-hwr] loaded");
 }

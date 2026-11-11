@@ -165,34 +165,6 @@ impl Recognizer {
     }
 }
 
-impl Recognizer {
-    /// Convert the strokes of a `.rm` page whose bounding-box centre lies inside the rectangle (page units, e.g. a
-    /// lasso selection). One entry per text line, top to bottom: (x0, y0, x1, y1 of the line's ink, text).
-    pub fn region_text(&self, rm_path: &Path, rect: (f32, f32, f32, f32)) -> Result<Vec<((f32, f32, f32, f32), String)>> {
-        let data = std::fs::read(rm_path)?;
-        let all = rm::read_strokes(&data)?;
-        let inside = |s: &rm::Stroke| {
-            let b = s.points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, p| {
-                (b.0.min(p.0), b.1.min(p.1), b.2.max(p.0), b.3.max(p.1))
-            });
-            let (cx, cy) = ((b.0 + b.2) / 2.0, (b.1 + b.3) / 2.0);
-            cx >= rect.0 && cx <= rect.2 && cy >= rect.1 && cy <= rect.3
-        };
-        let strokes: Vec<rm::Stroke> = all.into_iter().filter(|s| !s.points.is_empty() && inside(s)).collect();
-        let pen: f32 = std::env::var("RMPP_HWR_PEN").ok().and_then(|v| v.parse().ok()).unwrap_or(4.0);
-        let mut out = Vec::new();
-        for line in page::split_lines(&strokes) {
-            let b = line.strokes.iter().flat_map(|&i| strokes[i].points.iter())
-                .fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, p| (b.0.min(p.0), b.1.min(p.1), b.2.max(p.0), b.3.max(p.1)));
-            let (img, w, h) = page::render(&strokes, &line.strokes, pen);
-            if let Ok((text, _)) = self.recognize(&img, w, h, w) {
-                if !text.is_empty() { out.push((b, text)); }
-            }
-        }
-        Ok(out)
-    }
-}
-
 fn ink_box(gray: &[u8], w: usize, h: usize, stride: usize) -> Option<(usize, usize, usize, usize)> {
     let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
     for y in 0..h {
@@ -263,32 +235,6 @@ pub extern "C" fn rmpp_hwr_page(r: *const Recognizer, rm_path: *const c_char, ou
     match r.page_text(Path::new(&path)) {
         Ok(lines) => {
             let text = lines.iter().map(|l| l.0.as_str()).collect::<Vec<_>>().join("\n");
-            let bytes = text.as_bytes();
-            let mut n = bytes.len().min(out_len - 1);
-            while n > 0 && !text.is_char_boundary(n) { n -= 1; }
-            unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, n);
-                *out.add(n) = 0;
-            }
-            lines.len() as i32
-        }
-        Err(_) => -1,
-    }
-}
-
-/// Convert the strokes inside a rectangle (see `Recognizer::region_text`). Writes one line per text line,
-/// "x0 y0 x1 y1<TAB>text", separated by newlines (UTF-8, NUL-terminated). Returns the number of lines, or -1.
-#[no_mangle]
-pub extern "C" fn rmpp_hwr_region(r: *const Recognizer, rm_path: *const c_char, x0: f32, y0: f32, x1: f32, y1: f32,
-                                  out: *mut c_char, out_len: usize) -> i32 {
-    if r.is_null() || rm_path.is_null() || out.is_null() || out_len == 0 { return -1; }
-    let r = unsafe { &*r };
-    let path = unsafe { CStr::from_ptr(rm_path) }.to_string_lossy().into_owned();
-    match r.region_text(Path::new(&path), (x0, y0, x1, y1)) {
-        Ok(lines) => {
-            let text = lines.iter()
-                .map(|(b, t)| format!("{:.1} {:.1} {:.1} {:.1}\t{}", b.0, b.1, b.2, b.3, t))
-                .collect::<Vec<_>>().join("\n");
             let bytes = text.as_bytes();
             let mut n = bytes.len().min(out_len - 1);
             while n > 0 && !text.is_char_boundary(n) { n -= 1; }

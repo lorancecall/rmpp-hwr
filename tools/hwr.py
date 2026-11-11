@@ -576,6 +576,7 @@ def cmd_models(a):
 # ---- install on the tablet ----
 UI_SO = HWR / "build" / "librmpp-hwr-ui.so"
 REC_SO = HWR / "target" / "aarch64-unknown-linux-gnu" / "release" / "librmpp_hwr.so"
+GLYPHS = HWR / "build" / "glyphs.json"   # strokes for Convert to ink (ink/glyphs.py build -o build/glyphs.json)
 
 
 def cmd_install(a):
@@ -583,7 +584,7 @@ def cmd_install(a):
     model in /home. A model already on the tablet (e.g. your personal one) is kept unless --model is given.
     Run again after a reMarkable OS update (it replaces /usr/lib)."""
     ort_so = Path(cfg("HWR_ORT_AARCH64", str(DEV / "sdk" / "onnxruntime-linux-aarch64-1.31.1" / "lib" / "libonnxruntime.so.1.31.1")))
-    ui_so, rec_so = UI_SO, REC_SO
+    ui_so, rec_so, glyphs = UI_SO, REC_SO, GLYPHS
     if a.release or not (UI_SO.exists() and REC_SO.exists() and ort_so.exists()):
         # no local build: prebuilt files from the GitHub release
         import urllib.request
@@ -592,11 +593,12 @@ def cmd_install(a):
                ("latest/download" if tag == "latest" else f"download/{tag}")
         cache = DATA / "release" / tag
         cache.mkdir(parents=True, exist_ok=True)
-        for n in ("librmpp-hwr-ui.so", "librmpp_hwr.so", "libonnxruntime.so"):
+        for n in ("librmpp-hwr-ui.so", "librmpp_hwr.so", "libonnxruntime.so", "glyphs.json"):
             if not (cache / n).exists() or tag == "latest":
                 print(f"downloading {n} ({tag})")
                 urllib.request.urlretrieve(f"{base}/{n}", cache / n)
         ui_so, rec_so, ort_so = cache / "librmpp-hwr-ui.so", cache / "librmpp_hwr.so", cache / "libonnxruntime.so"
+        glyphs = cache / "glyphs.json"
     if not ssh(TABLET, "test -d /usr/lib/rmpp-preload.d && echo ok || true", capture=True).strip():
         sys.exit("rmpp-preload is not installed on the tablet: `vellum add rmpp-preload` "
                  "(https://github.com/lorancecall/rmpp-packages), then run `hwr install` again")
@@ -607,12 +609,17 @@ def cmd_install(a):
         shutil.copy(ui_so, st / "librmpp-hwr-ui.so.new")
         shutil.copy(rec_so, st / "librmpp_hwr.so.new")
         shutil.copy(ort_so, st / "libonnxruntime.so.new")
+        if glyphs.exists():
+            shutil.copy(glyphs, st / "glyphs.json.new")
+        else:
+            print(f"note: {glyphs} missing, Convert to ink needs it (ink/glyphs.py build -o build/glyphs.json)")
         if model:
             shutil.copy(model / "rec.onnx", st / "rec.onnx.new")
             shutil.copy((model / "dict.txt") if (model / "dict.txt").exists() else BASE_MODEL / "dict.txt", st / "dict.txt.new")
         ssh(TABLET, f"mkdir -p {DEV_DIR}")
         run(["scp", "-q", *[p.name for p in st.iterdir()], f"{TABLET}:{DEV_DIR}/"], cwd=st)
-    names = ["librmpp_hwr.so", "libonnxruntime.so"] + (["rec.onnx", "dict.txt"] if model else [])
+    names = ["librmpp_hwr.so", "libonnxruntime.so"] + (["glyphs.json"] if glyphs.exists() else []) + \
+            (["rec.onnx", "dict.txt"] if model else [])
     mv = " && ".join(f"mv -f {DEV_DIR}/{n}.new {DEV_DIR}/{n}" for n in names)
     ssh(TABLET, "set -e\n"
                 f"{mv}\n"

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Glyph strokes for "convert to ink": text -> pen strokes that look like handwriting.
+"""Glyph strokes for "Convert to ink": text -> pen strokes (the lasso's Convert to ink writes these on the page).
 
-Glyph sources, best first:
-  1. own   - the writer's own characters from practice v2 grid cells (hwr-data/collected/samples/practice_*/strokes.json)
-  2. font  - centre lines of an outline font (rendered, thinned to 1 px, traced into polylines)
+Glyph sources:
+  font  - centre lines of an outline font (rendered, thinned to 1 px, traced into a stroke graph). The release uses
+          Noto Sans KR (SIL OFL 1.1, see ink/OFL-NotoSansKR.txt); `--font` defaults to the copy collect.py downloads.
+  own   - optional (--own): the writer's own characters from practice v2 grid cells
+          (hwr-data/collected/samples/practice_*/strokes.json), sized like the font glyph of the same character
 
 Glyph format (glyphs.json): {"em": 1.0, "glyphs": {char: {"adv": float, "src": "own"|"font", "strokes": [[x, y, x, y, ...], ...]}}}
 Coordinates are in em units, y down, 0 = top of the em box, 1 = bottom; the baseline sits at BASELINE.
 
-  glyphs.py build  --font F.ttf [--own DIR] [--chars ko2350,ascii] -o glyphs.json
+  glyphs.py build  [--font F.ttf] [--own DIR] [--chars ko2350,ascii] -o glyphs.json
   glyphs.py layout glyphs.json "text" --x X --y Y --h H [--w W] -o strokes.json    (page units, for the tablet)
   glyphs.py preview glyphs.json "text" -o preview.png
 """
@@ -287,7 +289,15 @@ def fit_to(own, ref):
     return {"adv": round(float(ow * k + (ref["adv"] - fw)), 4), "src": "own", "strokes": strokes}
 
 
+FONT_NOTICE = ("Glyph centre lines derived from Noto Sans KR, Copyright 2014-2021 Adobe (http://www.adobe.com/), "
+               "with Reserved Font Name 'Source'. SIL Open Font License 1.1: https://openfontlicense.org")
+
+
 def cmd_build(a):
+    if not a.font:   # the Noto Sans KR instance collect.py downloads (and uses for practice pages)
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collect"))
+        from collect import font_file
+        a.font = str(font_file())
     font = ImageFont.truetype(a.font, SIZE)
     chars = charset(a.chars)
     glyphs = {}
@@ -301,8 +311,10 @@ def cmd_build(a):
         for ch, g in own.items():
             glyphs[ch] = fit_to(g, glyphs.get(ch))
         print(f"own glyphs: {len(own)}", file=sys.stderr)
-    Path(a.out).write_text(json.dumps({"em": 1.0, "baseline": BASELINE, "glyphs": glyphs}, ensure_ascii=False),
-                           encoding="utf-8")
+    meta = {"em": 1.0, "baseline": BASELINE, "font": Path(a.font).name}
+    if "notosanskr" in Path(a.font).name.lower():
+        meta["notice"] = FONT_NOTICE
+    Path(a.out).write_text(json.dumps({**meta, "glyphs": glyphs}, ensure_ascii=False), encoding="utf-8")
     print(f"{a.out}: {len(glyphs)} glyphs")
 
 
@@ -359,7 +371,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
     b = sp.add_parser("build")
-    b.add_argument("--font", required=True)
+    b.add_argument("--font", help="TTF/OTF; default: Noto Sans KR from collect.py")
     b.add_argument("--own", help="collected data dir (with samples/practice_*/strokes.json)")
     b.add_argument("--chars", default="ko2350,ascii")
     b.add_argument("-o", "--out", required=True)
