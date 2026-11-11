@@ -603,22 +603,30 @@ void closeStaleInkEdit() {
         closeInkEdit();
 }
 
-void finishInkEdit(bool ok) {
-    const InkEdit e = g_edit;
-    closeInkEdit();
-    if (!ok || !e.sc || !e.ph || !e.dv || e.dv->property("currentPageId").toString() != e.page) return;
+// One full e-paper refresh (xochitl's own ghost buster, as rmpp-refresh does) after ms: the edit box and the
+// keyboard leave ghosting behind when they close.
+void fullRefreshLater(QPointer<QQuickItem> dvp, int ms) {
+    QTimer::singleShot(ms, qApp, [dvp] {
+        QObject *gb = dvp && dvp->isVisible() ? dvp->property("ghostBuster").value<QObject *>() : nullptr;
+        if (!gb || !QMetaObject::invokeMethod(gb, "userRequestedClear")) qWarning("[rmpp-hwr] no ghost buster");
+    });
+}
+
+// Applies the edit; true when the ink is being redrawn (putInk).
+bool applyInkEdit(const InkEdit &e) {
+    if (!e.sc || !e.ph || !e.dv || e.dv->property("currentPageId").toString() != e.page) return false;
     const QString text = g_state->value(QStringLiteral("inkText")).toString().trimmed();
     const QJsonArray recs = readInkRecords();
-    if (e.rec < 0 || e.rec >= recs.size()) return;
+    if (e.rec < 0 || e.rec >= recs.size()) return false;
     const QJsonObject r = recs[e.rec].toObject();
     const int weight = qBound(0, g_state->value(QStringLiteral("inkWeight")).toInt(), 2);
     const double size = qBound(50, g_state->value(QStringLiteral("inkSize")).toInt(), 200) / 100.0;
     if (text == r.value(QStringLiteral("text")).toString() && weight == r.value(QStringLiteral("weight")).toInt(1)
         && qFuzzyCompare(size, 1.0))
-        return;   // nothing changed
+        return false;   // nothing changed
     // where the ink is now (it may have been moved since it was made)
     const QRectF sel = selectionRect(e.sc, e.layer);
-    if (sel.isEmpty()) { setStatus(QStringLiteral("selection lost, select the ink again"), false); return; }
+    if (sel.isEmpty()) { setStatus(QStringLiteral("selection lost, select the ink again"), false); return false; }
     // the ink may have been scaled since: k = its size now / when recorded
     const double k = sel.width() / qMax(1.0, r.value(QStringLiteral("w")).toDouble());
     const QPointF origin = sel.topLeft() + QPointF(r.value(QStringLiteral("ox")).toDouble(), r.value(QStringLiteral("oy")).toDouble()) * k;
@@ -629,10 +637,19 @@ void finishInkEdit(bool ok) {
     pl.weight = weight;
     if (text.isEmpty()) {   // empty text: just delete the ink
         QMetaObject::invokeMethod(e.sc, "deleteSelectedItems", Q_ARG(int, e.layer));
-        return;
+        return false;
     }
     qWarning("[rmpp-hwr] ink edit: %s", qPrintable(QString(text).replace(QLatin1Char('\n'), QLatin1String(" | "))));
     putInk(e.sc, e.ph, e.dv, e.layer, true, pl, text, e.rec);
+    return true;
+}
+
+void finishInkEdit(bool ok) {
+    const InkEdit e = g_edit;
+    closeInkEdit();
+    const bool redraw = ok && applyInkEdit(e);
+    // once: after the keyboard has slid out, or after the new ink's last redraw (putInk: 400 ms + 1000 ms)
+    fullRefreshLater(e.dv, redraw ? 1800 : 700);
 }
 
 const char *kBusyQml = R"QML(
