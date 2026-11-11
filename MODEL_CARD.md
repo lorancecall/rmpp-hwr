@@ -10,7 +10,7 @@ rmpp-hwr-db data; older versions are not kept on the tablet.
 | Task | Line recognition of handwriting (CTC), Korean with English and digits, 11,945 characters |
 | Architecture | PaddleOCR PP-OCRv5 mobile recognition (SVTR-LCNet), input 3 x 48 x W, ONNX opset 14 |
 | Error | about 2 % character error rate on the held-out lines of the rmpp-hwr-db data |
-| License of the weights | **CC BY-SA 4.0** (proposed; see "Licenses" below) |
+| License of the weights | **CC BY-SA 4.0** (see "Licenses" below) |
 
 ## Training data
 
