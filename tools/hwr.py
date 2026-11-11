@@ -9,8 +9,9 @@
                            new notebook rmpp-practice-N (N lines, default 100) from the texts, onto the tablet
   hwr practice --v2 [N] [--lang ko|en]
                            structured pages (N pages, default 8) for your language + English + digits;
-                           notebooks go into the tablet folder "hwr-db"
-  hwr tidy                 move older practice notebooks from the top level into "hwr-db"
+                           notebooks go into the tablet folder "hwr-db/<lang>"
+  hwr tidy [--lang ko]     move older practice notebooks (top level or "hwr-db") into "hwr-db/<lang>"
+  hwr contribute [--lang ko]  share practice pages with rmpp-hwr-db (data/<lang>/); --lang: only that language
   hwr upload               copy hwr-data/collected to the training work dir (data/personal)
   hwr train [NAME]         upload, then personal synth -> fine-tune -> export + judge (see train/README.md)
   hwr status               training jobs and the last lines of the newest log
@@ -164,52 +165,71 @@ def cmd_practice(a):
     if a.no_upload:
         print(f"wrote {pdf} (not uploaded)")
         return
+    lang = (a.lang or cfg("HWR_LANG", "ko")) if a.v2 else "ko"      # line notebooks are Korean + English
     stage = Path(tempfile.mkdtemp(prefix=f"{stem}-"))
-    folder = tablet_folder(stage)
+    folder = tablet_folder(lang, stage)
     run([py(), "-I", str(COLLECT), "make-doc", "--pdf", str(pdf), "--name", f"rmpp-{stem}", "--out", str(stage),
          "--parent", folder], env=env)
     # relative names: scp would read "C:\..." as a host name
     run(["scp", "-q", "-r", *[p.name for p in stage.iterdir()], f"{TABLET}:{XOCHITL}/"], cwd=stage)
     restart_xochitl()
     shutil.rmtree(stage, ignore_errors=True)
-    print(f"rmpp-{stem} ({a.count} {'pages' if a.v2 else 'lines'}) is on the tablet, in the folder {FOLDER}")
+    print(f"rmpp-{stem} ({a.count} {'pages' if a.v2 else 'lines'}) is on the tablet, in the folder {FOLDER}/{lang}")
 
 
-FOLDER = "hwr-db"   # tablet folder for practice notebooks (pull finds them by name, wherever they are)
+FOLDER = "hwr-db"   # tablet folder; practice notebooks in FOLDER/<lang>/ (pull finds them by name, wherever they are)
 
 
-def tablet_folder(stage=None):
-    """Id of the top-level tablet folder FOLDER. When it is missing and `stage` is given, its files are written
-    there (to be copied with the notebook); otherwise None."""
+def find_folder(name, parent=""):
+    """Id of the tablet folder (CollectionType) `name` inside `parent` ("" = top level), or None."""
     ids = ssh(TABLET, f"cd {XOCHITL} && for f in $(grep -l CollectionType *.metadata 2>/dev/null); do "
-                      f"grep -q 'visibleName.: .{FOLDER}.' $f && ! grep -q 'deleted.: true' $f && echo ${{f%.metadata}}; "
-                      "done; true", capture=True).split()
-    if ids or stage is None:
-        return ids[0] if ids else None
+                      f"grep -q 'visibleName.: .{name}.' $f && grep -q 'parent.: .{parent}.' $f && "
+                      f"! grep -q 'deleted.: true' $f && echo ${{f%.metadata}}; done; true", capture=True).split()
+    return ids[0] if ids else None
+
+
+def new_folder(stage, name, parent=""):
+    """Write the files of a new tablet folder into `stage` (copied to the tablet with the notebook)."""
     fid = str(uuid.uuid4())
     meta = {"deleted": False, "lastModified": str(int(time.time() * 1000)), "metadatamodified": False,
-            "modified": False, "parent": "", "pinned": False, "synced": False, "type": "CollectionType",
-            "version": 0, "visibleName": FOLDER}
+            "modified": False, "parent": parent, "pinned": False, "synced": False, "type": "CollectionType",
+            "version": 0, "visibleName": name}
     (stage / f"{fid}.metadata").write_text(json.dumps(meta, indent=4))
     (stage / f"{fid}.content").write_text(json.dumps({"tags": []}, indent=4))
     return fid
 
 
+def tablet_folder(lang, stage=None):
+    """Id of the tablet folder FOLDER/<lang> (practice notebooks and Conversions of one language). Missing folders
+    are written into `stage` when given; otherwise None is returned for them."""
+    root = find_folder(FOLDER)
+    if not root and stage is None:
+        return None
+    root = root or new_folder(stage, FOLDER)
+    sub = find_folder(lang, root)
+    if not sub and stage is None:
+        return None
+    return sub or new_folder(stage, lang, root)
+
+
 def cmd_tidy(a):
-    """Move practice notebooks that are still at the top level into the FOLDER folder."""
-    fid = tablet_folder()
-    stage = None
-    if not fid:
-        stage = Path(tempfile.mkdtemp(prefix="hwr-folder-"))
-        fid = tablet_folder(stage)
-        run(["scp", "-q", *[p.name for p in stage.iterdir()], f"{TABLET}:{XOCHITL}/"], cwd=stage)
-        shutil.rmtree(stage, ignore_errors=True)
+    """Move practice notebooks at the top level or directly in FOLDER into FOLDER/<lang>."""
+    lang = a.lang or cfg("HWR_LANG", "ko")
+    stage = Path(tempfile.mkdtemp(prefix="hwr-folder-"))
+    root = find_folder(FOLDER)
+    fid = tablet_folder(lang, stage)
+    made = list(stage.iterdir())
+    if made:
+        run(["scp", "-q", *[p.name for p in made], f"{TABLET}:{XOCHITL}/"], cwd=stage)
+    shutil.rmtree(stage, ignore_errors=True)
+    parents = [""] + ([root] if root else [])
     moved = ssh(TABLET, f"cd {XOCHITL} && for f in $(grep -l 'visibleName.: .rmpp-practice' *.metadata 2>/dev/null); do "
-                        f"grep -q 'parent.: \"\"' $f && sed -i 's/\"parent\": \"\"/\"parent\": \"{fid}\"/' $f && echo $f; "
-                        "done; true", capture=True).split()
-    if moved or stage:
+                        + " ".join(f"grep -q 'parent.: \"{p}\"' $f && sed -i 's/\"parent\": \"{p}\"/\"parent\": \"{fid}\"/' $f && echo $f;"
+                                   for p in parents)
+                        + " done; true", capture=True).split()
+    if moved or made:
         restart_xochitl()
-    print(f"{len(moved)} practice notebook(s) moved into {FOLDER}")
+    print(f"{len(moved)} practice notebook(s) moved into {FOLDER}/{lang}")
 
 
 # ---- training backends: local GPU or Slurm cluster (settings in .env) ----
@@ -554,6 +574,9 @@ def cmd_contribute(a):
         sys.exit(f"First join (consent form): https://github.com/{repo}/issues/new?template=join.yml\n"
                  f"then run: hwr contribute --consent <issue number>")
     files = sorted(COLLECTED.glob("samples/practice_*/strokes.json"))
+    if a.lang:     # only notebooks of this language (the first language of their mix)
+        files = [f for f in files if (json.loads(f.read_text(encoding="utf-8"))["template"].get("languages")
+                                      or OLD_MIX)[0] == a.lang]
     if not files:
         sys.exit("no practice v2 pages collected yet: `hwr practice --v2`, write them, then `hwr pull`")
     import hashlib
@@ -798,7 +821,9 @@ def main():
     p.add_argument("--kinds", help="v2 page kinds, comma list of grid,digits,english,free (default: a mix)")
     p.add_argument("--lang", help="v2: your language (ko, en; default HWR_LANG or ko); pages mix it with English and digits")
     p.set_defaults(f=cmd_practice)
-    sp.add_parser("tidy", help='move practice notebooks at the top level into the tablet folder "hwr-db"').set_defaults(f=cmd_tidy)
+    p = sp.add_parser("tidy", help='move practice notebooks at the top level or in "hwr-db" into "hwr-db/<lang>"')
+    p.add_argument("--lang", help="language folder (default HWR_LANG or ko)")
+    p.set_defaults(f=cmd_tidy)
     sp.add_parser("upload").set_defaults(f=cmd_upload)
     p = sp.add_parser("qc", help="check collected lines (labels vs writing) before training")
     p.add_argument("--cer", type=float, default=0.6, help="flag lines whose base-model CER is above this")
@@ -829,6 +854,7 @@ def main():
     p.add_argument("--consent", type=int, help="number of your join issue in the dataset repo (once)")
     p.add_argument("--all", action="store_true", help="also re-share pages shared before")
     p.add_argument("--dry-run", action="store_true", help="commit locally, do not push or open a PR")
+    p.add_argument("--lang", help="only notebooks of this language (ko, en, ...)")
     p.set_defaults(f=cmd_contribute)
     p = sp.add_parser("dataset", help="copy a downloaded dataset folder to <work>/data/NAME")
     p.add_argument("path"); p.add_argument("name"); p.set_defaults(f=cmd_dataset)

@@ -36,10 +36,10 @@ hwr practice 60 --text my-notes.txt  # your own text
 hwr practice --list                  # which texts exist, how many lines each
 hwr practice --v2                    # structured pages (8): your language + English + digits
 hwr practice --v2 --lang en          # English + digits
-hwr tidy                             # move older practice notebooks into the "hwr-db" folder
+hwr tidy                             # move older practice notebooks into "hwr-db/<lang>"
 ```
 
-- The notebook appears in the tablet folder **hwr-db** (made on first use). Write each sentence inside its
+- The notebook appears in the tablet folder **hwr-db/<lang>** (made on first use). Write each sentence inside its
   box, one line per box.
 - The sentence is the label, so nothing needs correcting. This is the fastest way to collect data.
 - Text files: one line per box (long lines are wrapped at spaces), a blank line between passages.
