@@ -26,7 +26,7 @@ On the tablet:
 |---|---|
 | `src/` | Rust recognizer: reads `.rm` pages, renders lines, runs the PaddleOCR PP-OCRv5 Korean recognition model (ONNX, onnxruntime). Also exports the typed text of a page. |
 | `ui/` | xochitl add-on (LD_PRELOAD): lasso Convert to ink and text editing (`ui/ink.h`), "Convert page" in the toolbar, Settings > Handwriting (records, corrections, model info). `ui/exp/`: experiments for the developer loader (`DEV=1 ui/build.sh`). |
-| `ink/` | `glyphs.py`: builds `glyphs.json` (text -> pen strokes) from the centre lines of Noto Sans KR (OFL, see NOTICE). `own.py`: builds `glyphs_own.json`, your own handwriting (practice cells, characters cut out of practice lines and checked by the recognizer, Hangul composed from your own jamo), for "Ink handwriting: My handwriting"; it stays on your PC and tablet. |
+| `ink/` | `glyphs.py`: builds `glyphs.json` (text -> pen strokes) from the centre lines of Noto Sans KR (OFL, see NOTICE). |
 | `model/` | base model `rec.onnx` + `dict.txt` (PaddleOCR `korean_PP-OCRv5_mobile_rec`, Apache-2.0, see NOTICE). |
 | `collect/` | practice notebooks (v1 lines, v2 structured pages with per-character cells), pulling handwriting from the tablet, line/character images. |
 | `tools/hwr` | one command for the whole loop: `practice`, `pull`, `qc`, `upload`, `train`, `fetch`, `eval`, `deploy`, `contribute`, ... |

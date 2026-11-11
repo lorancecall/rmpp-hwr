@@ -4,13 +4,11 @@
 Glyph sources:
   font  - centre lines of an outline font (rendered, thinned to 1 px, traced into a stroke graph). The release uses
           Noto Sans KR (SIL OFL 1.1, see ink/OFL-NotoSansKR.txt); `--font` defaults to the copy collect.py downloads.
-  own   - optional (--own): the writer's own characters from practice v2 grid cells
-          (hwr-data/collected/samples/practice_*/strokes.json), sized like the font glyph of the same character
 
-Glyph format (glyphs.json): {"em": 1.0, "glyphs": {char: {"adv": float, "src": "own"|"font", "strokes": [[x, y, x, y, ...], ...]}}}
+Glyph format (glyphs.json): {"em": 1.0, "glyphs": {char: {"adv": float, "src": "font", "strokes": [[x, y, x, y, ...], ...]}}}
 Coordinates are in em units, y down, 0 = top of the em box, 1 = bottom; the baseline sits at BASELINE.
 
-  glyphs.py build  [--font F.ttf] [--own DIR] [--chars ko2350,ascii] -o glyphs.json
+  glyphs.py build  [--font F.ttf] [--chars ko2350,ascii] -o glyphs.json
   glyphs.py layout glyphs.json "text" --x X --y Y --h H [--w W] -o strokes.json    (page units, for the tablet)
   glyphs.py preview glyphs.json "text" -o preview.png
 """
@@ -231,62 +229,9 @@ def font_glyph(font, ch):
     return {"adv": round(adv, 4), "src": "font", "strokes": out}
 
 
-# ---------------------------------------------------------------- own handwriting (practice v2 cells)
-def own_glyphs(root):
-    """Characters from practice v2 grid cells: the cell box is the em box (square, with cross guides)."""
-    best = {}
-    for f in sorted(Path(root).glob("samples/practice_*/strokes.json")):
-        j = json.loads(f.read_text(encoding="utf-8"))
-        tpl = j.get("template", {})
-        items = {it["id"]: it for it in tpl.get("items", [])}
-        assign = {a["id"]: a for a in j.get("assign", [])}
-        # chars.tsv holds the labels collect.py trusted (cells/<item>_<cell>.png<TAB>char)
-        tsv = f.parent / "chars.tsv"
-        labels = [l.split("\t") for l in tsv.read_text(encoding="utf-8").splitlines() if "\t" in l] if tsv.exists() else []
-        for path, ch in labels:
-            iid, ci = (int(v) for v in Path(path).stem.split("_"))
-            it, a = items.get(iid), assign.get(iid)
-            if not it or not a or len(ch) != 1 or ch.isspace():
-                continue
-            page = j["pages"].get(str(a["page"]))
-            idx = a["cells"][ci] if ci < len(a["cells"]) else []
-            if not page or not idx:
-                continue
-            cell = it["cells"][ci]
-            x0, y0, x1, y1 = cell["box"]
-            size = max(x1 - x0, y1 - y0)
-            # keep the writer's size and height inside the cell (cell bottom = 0.9 em); horizontally the ink
-            # starts at 0.04 and the advance is the ink width (handwriting is proportional, not monospaced)
-            strokes = [(np.array(page[i]["points"], dtype=float)[:, :2] - [x0, y0]) / size * 0.9 for i in idx]
-            lo = min(p[:, 0].min() for p in strokes)
-            hi = max(p[:, 0].max() for p in strokes)
-            strokes = [p - [lo - 0.04, 0] for p in strokes]
-            best[ch] = {"adv": round(float(hi - lo + 0.08), 4), "src": "own",   # last sample wins (latest practice)
-                        "strokes": [[round(float(v), 4) for v in rdp(p, 0.004).reshape(-1)] for p in strokes]}
-    return best
-
-
 def bounds(g):
     p = np.concatenate([np.array(s, dtype=float).reshape(-1, 2) for s in g["strokes"]])
     return p.min(0), p.max(0)
-
-
-def fit_to(own, ref):
-    """Scale and place an own glyph like the font glyph of the same character (cells come in S/M/L sizes and the
-    writer does not fill them evenly; the font fixes size and vertical position, the writer keeps the shape)."""
-    if not own["strokes"] or not ref or not ref["strokes"]:
-        return own
-    (ox0, oy0), (ox1, oy1) = bounds(own)
-    (fx0, fy0), (fx1, fy1) = bounds(ref)
-    ow, oh, fw, fh = max(ox1 - ox0, 1e-3), max(oy1 - oy0, 1e-3), max(fx1 - fx0, 1e-3), max(fy1 - fy0, 1e-3)
-    k = min(fh / oh, 1.3 * fw / ow) if fh > 0.05 else fw / ow
-    cy = (fy0 + fy1) / 2
-    strokes = []
-    for st in own["strokes"]:
-        p = np.array(st, dtype=float).reshape(-1, 2)
-        p = np.column_stack([(p[:, 0] - ox0) * k + fx0, (p[:, 1] - (oy0 + oy1) / 2) * k + cy])
-        strokes.append([round(float(v), 4) for v in p.reshape(-1)])
-    return {"adv": round(float(ow * k + (ref["adv"] - fw)), 4), "src": "own", "strokes": strokes}
 
 
 FONT_NOTICE = ("Glyph centre lines derived from Noto Sans KR, Copyright 2014-2021 Adobe (http://www.adobe.com/), "
@@ -306,11 +251,6 @@ def cmd_build(a):
         if n % 250 == 0:
             print(f"{n}/{len(chars)}", file=sys.stderr)
     glyphs[" "] = {"adv": round(font.getlength(" ") / SIZE, 4) or 0.3, "src": "font", "strokes": []}
-    if a.own:
-        own = own_glyphs(a.own)
-        for ch, g in own.items():
-            glyphs[ch] = fit_to(g, glyphs.get(ch))
-        print(f"own glyphs: {len(own)}", file=sys.stderr)
     meta = {"em": 1.0, "baseline": BASELINE, "font": Path(a.font).name}
     if "notosanskr" in Path(a.font).name.lower():
         meta["notice"] = FONT_NOTICE
@@ -372,7 +312,6 @@ def main():
     sp = ap.add_subparsers(dest="cmd", required=True)
     b = sp.add_parser("build")
     b.add_argument("--font", help="TTF/OTF; default: Noto Sans KR from collect.py")
-    b.add_argument("--own", help="collected data dir (with samples/practice_*/strokes.json)")
     b.add_argument("--chars", default="ko2350,ascii")
     b.add_argument("-o", "--out", required=True)
     l = sp.add_parser("layout")

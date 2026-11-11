@@ -47,7 +47,7 @@ const char *kPages = "/home/root/.local/share/remarkable/xochitl";
 
 const char *kConf = "/home/root/.config/rmpp-hwr/settings.conf";
 
-// busy, status, command (written by QML), settings converter / collect / hwrModel / inkStyle, info modelName / conversions
+// busy, status, command (written by QML), settings converter / collect / hwrModel, info modelName / conversions
 QQmlPropertyMap *g_state = nullptr;
 bool g_confLoaded = false;
 
@@ -64,7 +64,6 @@ void loadSettings() {
     if (conv.isEmpty()) conv = s.contains(QStringLiteral("model")) && s.value(QStringLiteral("model")).toString() != QLatin1String("builtin")
         ? QStringLiteral("rmpp") : QStringLiteral("remarkable");
     g_state->insert(QStringLiteral("converter"), conv);
-    g_state->insert(QStringLiteral("inkStyle"), s.value(QStringLiteral("inkStyle"), QStringLiteral("own")).toString());
     g_state->insert(QStringLiteral("collect"), s.value(QStringLiteral("collect"), true).toBool());
     // Lasso convert: typed text (default) or a text object (ink in the language's font; v0.2's lassoInk=true).
     g_state->insert(QStringLiteral("textObject"), s.value(QStringLiteral("textObject"), s.value(QStringLiteral("lassoInk"), false)).toBool());
@@ -285,7 +284,6 @@ void refreshInfo() {
     QString curId = QStringLiteral("builtin");
     for (const ModelEntry &e : all) if (e.dir == cur) curId = e.id;
     g_state->insert(QStringLiteral("modelInUse"), curId);
-    g_state->insert(QStringLiteral("hasOwnGlyphs"), QFileInfo::exists(QLatin1String(kLibDir) + QStringLiteral("/glyphs_own.json")));
     // models grouped by language (Settings > Handwriting > Language)
     QStringList order;
     QHash<QString, QJsonArray> byLang;
@@ -1260,8 +1258,6 @@ void hwrInit() {
     g_state->insert(QStringLiteral("lassoReplace"), false);
     g_state->insert(QStringLiteral("pageReplace"), false);
     g_state->insert(QStringLiteral("languageInUse"), QString());
-    g_state->insert(QStringLiteral("inkStyle"), QStringLiteral("own"));
-    g_state->insert(QStringLiteral("hasOwnGlyphs"), false);
     g_state->insert(QStringLiteral("collect"), true);
     g_state->insert(QStringLiteral("inkText"), QString());
     g_state->insert(QStringLiteral("inkWeight"), 1);
@@ -1289,9 +1285,6 @@ void hwrInit() {
         else if (cmd.startsWith(QLatin1String("converter:"))) {
             saveSetting(QStringLiteral("converter"), cmd.mid(10) == QLatin1String("remarkable") ? QStringLiteral("remarkable") : QStringLiteral("rmpp"));
             refreshInfo();
-        }
-        else if (cmd.startsWith(QLatin1String("style:"))) {
-            saveSetting(QStringLiteral("inkStyle"), cmd.mid(6));   // glyphs reload on the next conversion
         }
         else if (cmd.startsWith(QLatin1String("model:"))) {
             // settings.conf key "model"; in the QML map it is "hwrModel": a map key named "model" broke xochitl's
