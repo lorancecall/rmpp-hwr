@@ -80,19 +80,16 @@ QList<InkPt> inkPoints(const QList<QPointF> &xy, quint16 width) {
 }
 
 // Add strokes (page coordinates) with the current pen. Returns the number added, -1 if Line is not as expected.
-int addInkStrokes(QObject *sc, QObject *ph, const QList<QList<QPointF>> &strokes) {
+// Converted text is drawn like a font: Fineliner (even width), black, thickness from the text size (em, page units).
+int addInkStrokes(QObject *sc, QObject *ph, const QList<QList<QPointF>> &strokes, double em) {
+    Q_UNUSED(ph);
     const int add = sc->metaObject()->indexOfMethod("addDrawingLine(Line)");
     const QMetaType type = add >= 0 ? sc->metaObject()->method(add).parameterMetaType(0) : QMetaType();
     if (add < 0 || type.sizeOf() != 88) return -1;
-    bool ok = false;
-    int tool = ph->property("lineTool").toInt(&ok);
-    // with the lasso active the "pen" is the selection tool (11), and erasers/highlighters make no sense for text
-    static const QList<int> pens{1, 2, 3, 4, 7, 12, 13, 14, 15, 16, 17, 21};
-    if (!ok || !pens.contains(tool)) tool = 15;   // Ballpointv2
-    const int color = ph->property("lineColor").toInt();
-    const uint argb = ph->property("lineArgbCode").toUInt();
-    double thick = ph->property("lineThickness").toDouble();
-    if (thick <= 0) thick = 2;
+    const int tool = 17;   // Finelinerv2
+    const int color = 0;   // black
+    const uint argb = 0xff000000u;
+    const double thick = qBound(2.0, em / 20.0, 6.0);
     for (const auto &s : strokes) {
         void *line = type.create();
         auto *b = static_cast<char *>(line);
@@ -277,12 +274,15 @@ void writeInkRecords(const QJsonArray &a) {
     }
 }
 
+// Same page, same number of strokes and the same aspect ratio (+-4%): moved and/or scaled, it is still our ink.
 int findInkRecord(const QJsonArray &recs, const QString &page, int n, const QRectF &sel) {
+    if (sel.height() <= 0) return -1;
+    const double aspect = sel.width() / sel.height();
     for (int i = int(recs.size()) - 1; i >= 0; --i) {
         const QJsonObject o = recs[i].toObject();
-        if (o.value(QStringLiteral("page")).toString() == page && o.value(QStringLiteral("n")).toInt() == n
-            && qAbs(o.value(QStringLiteral("w")).toDouble() - sel.width()) < 3
-            && qAbs(o.value(QStringLiteral("h")).toDouble() - sel.height()) < 3)
+        const double w = o.value(QStringLiteral("w")).toDouble(), h = o.value(QStringLiteral("h")).toDouble();
+        if (o.value(QStringLiteral("page")).toString() == page && o.value(QStringLiteral("n")).toInt() == n && h > 0
+            && qAbs(w / h - aspect) / (w / h) < 0.04)
             return i;
     }
     return -1;
@@ -313,7 +313,7 @@ void putInk(QPointer<QObject> scp, QPointer<QObject> php, QPointer<QQuickItem> d
     else QMetaObject::invokeMethod(scp, "clearSelectedItems");
     QTimer::singleShot(400, scp, [=] {
         if (!scp || !php) { setStatus(QStringLiteral("page closed"), false); return; }
-        const int added = addInkStrokes(scp, php, pl.strokes);
+        const int added = addInkStrokes(scp, php, pl.strokes, pl.em);
         if (added > 0) {
             selectInk(scp, pl.strokes);
             recordInk(scp, scp->property("pageId").toString(), text, pl, added, replaceIdx);
@@ -334,16 +334,15 @@ import ark.controls as ArkControls
 Rectangle {
     id: box
     property string initial: ""
-    width: (parent ? parent.width : 1620) - 120; height: 760
+    width: (parent ? parent.width : 1620) - 120; height: 740
     x: 60; y: 90
     z: 10000
     color: "white"; border.color: "black"; border.width: 3
     MouseArea { anchors.fill: parent }   // keep taps off the page
     Text { x: 36; y: 26; text: "Edit text"; font.pixelSize: 36; font.bold: true }
-    Text { x: 36; y: 76; text: "New line: Enter. The ink wraps at the width of the original ink."; font.pixelSize: 24; color: "#555555" }
     Rectangle {
         id: field
-        x: 36; y: 124; width: parent.width - 72; height: 500
+        x: 36; y: 86; width: parent.width - 72; height: 520
         border.color: "black"; border.width: 2
         Flickable {
             id: flick
@@ -369,7 +368,7 @@ Rectangle {
         }
     }
     Row {
-        x: parent.width - width - 36; y: 650; spacing: 24
+        x: parent.width - width - 36; y: 636; spacing: 24
         ArkControls.Button { text: "Cancel"; type: ArkTokens.Button.secondary; onClicked: hwr.command = "inkcancel#" + Date.now() }
         ArkControls.Button {
             text: "OK"
@@ -420,10 +419,12 @@ void finishInkEdit(bool ok) {
     // where the ink is now (it may have been moved since it was made)
     const QRectF sel = selectionRect(e.sc, e.layer);
     if (sel.isEmpty()) { setStatus(QStringLiteral("selection lost, select the ink again"), false); return; }
-    const QPointF origin = sel.topLeft() + QPointF(r.value(QStringLiteral("ox")).toDouble(), r.value(QStringLiteral("oy")).toDouble());
+    // the ink may have been scaled since: k = its size now / when recorded
+    const double k = sel.width() / qMax(1.0, r.value(QStringLiteral("w")).toDouble());
+    const QPointF origin = sel.topLeft() + QPointF(r.value(QStringLiteral("ox")).toDouble(), r.value(QStringLiteral("oy")).toDouble()) * k;
     // wrap at the width of the ink being edited (at least 8 em), so longer text grows downwards
-    const double em = r.value(QStringLiteral("em")).toDouble();
-    const double maxW = qMax(r.value(QStringLiteral("w")).toDouble() - r.value(QStringLiteral("ox")).toDouble(), em * 8);
+    const double em = r.value(QStringLiteral("em")).toDouble() * k;
+    const double maxW = qMax(sel.width() - r.value(QStringLiteral("ox")).toDouble() * k, em * 8);
     const Placed pl = placeText(text, origin, em, maxW);
     if (text.isEmpty()) {   // empty text: just delete the ink
         QMetaObject::invokeMethod(e.sc, "deleteSelectedItems", Q_ARG(int, e.layer));
@@ -431,6 +432,25 @@ void finishInkEdit(bool ok) {
     }
     qWarning("[rmpp-hwr] ink edit: %s", qPrintable(QString(text).replace(QLatin1Char('\n'), QLatin1String(" | "))));
     putInk(e.sc, e.ph, e.dv, e.layer, true, pl, text, e.rec);
+}
+
+const char *kBusyQml = R"QML(
+import QtQuick
+Rectangle {
+    property string message: "Converting…"
+    width: label.implicitWidth + 80; height: 90
+    x: ((parent ? parent.width : 1620) - width) / 2; y: 40
+    z: 10000
+    color: "white"; border.color: "black"; border.width: 3; radius: 8
+    Text { id: label; anchors.centerIn: parent; text: parent.message; font.pixelSize: 36 }
+}
+)QML";
+
+void showInkBusy(QQuickItem *dv) {
+    if (g_inkBusy) g_inkBusy->deleteLater();
+    QQmlEngine *eng = qmlEngine(dv);
+    QQmlContext *ctx = qmlContext(dv);
+    g_inkBusy = (eng && ctx && dv->window()) ? createInline(eng, ctx, kBusyQml, "InkBusy", dv->window()->contentItem()) : nullptr;
 }
 
 // ---- the lasso menu button: edit our own ink, otherwise convert the selection ----
@@ -454,6 +474,7 @@ void convertSelectionToInk(bool replace) {
     }
     const QString path = QStringLiteral("%1/%2/%3.rm").arg(QLatin1String(kPages), doc->property("id").toString(), pageId);
     setStatus(QStringLiteral("Converting…"), true);
+    showInkBusy(dv);
     QPointer<QObject> scp(sc), php(ph);
     QPointer<QQuickItem> dvp(dv);
     std::thread([=] {
