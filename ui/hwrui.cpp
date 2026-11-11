@@ -270,10 +270,22 @@ bool classStarts(QObject *o, const char *prefix) {
     return qstrncmp(o->metaObject()->className(), prefix, qstrlen(prefix)) == 0;
 }
 
+// "Converting…" box shown while converting a selection to ink (ink.h); setStatus closes it, or shows the message.
+QPointer<QObject> g_inkBusy;
+
 void setStatus(const QString &s, bool busy) {
     g_state->insert(QStringLiteral("status"), s);
     g_state->insert(QStringLiteral("busy"), busy);
     if (!s.isEmpty()) qWarning("[rmpp-hwr] %s", qPrintable(s));
+    if (!busy && g_inkBusy) {
+        if (s.isEmpty()) {
+            g_inkBusy->deleteLater();
+        } else {   // keep the box a moment with the message
+            g_inkBusy->setProperty("message", s);
+            QTimer::singleShot(2500, g_inkBusy, [o = g_inkBusy] { if (o) o->deleteLater(); });
+        }
+        g_inkBusy = nullptr;
+    }
 }
 
 // ---- typing the result on the new page ----
@@ -799,7 +811,7 @@ QString inkIconUrl() {
     QFile f(out);
     if (!svg.isEmpty() && f.open(QIODevice::WriteOnly) && f.write(svg.toUtf8()) > 0) {
         f.close();
-        url = QUrl::fromLocalFile(out).toString();
+        url = out;   // xochitl's Icon takes a plain path (a file:// URL is "not found")
     } else {
         url = QStringLiteral("qrc:/ark/icons/ballpoint_tip");
     }

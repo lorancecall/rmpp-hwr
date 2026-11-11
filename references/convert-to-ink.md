@@ -60,20 +60,23 @@ dereferences unknown pointers directly.
 rmscene can write v6 scene files, but xochitl keeps the open page in memory and writes it back, so edits to an open
 page's file are lost or conflict, and there is no reload slot for one page. Only usable for a closed document.
 
-### Edit text (built 2026-11-10, deployed, NOT yet tested on the tablet)
+### Edit text (tested 2026-11-10: edit, move + edit, resize + edit work)
 
 - Every conversion is recorded in `/home/root/.local/share/rmpp-hwr/ink.json`: page id, text (lines joined with
   `
 `), stroke count `n`, selection size `w`/`h` (measured from the selection right after the new ink is selected),
   em origin offset `ox`/`oy` from the selection's top-left, `em` size. Max 500 records.
-- Lasso menu button: if the selection on this page has the same stroke count and size (+-3) as a record, it is our ink
-  (wherever it was moved) and the button opens an edit box instead of converting.
+- Lasso menu button: if the selection on this page has the same stroke count and aspect ratio (+-4%) as a record, it
+  is our ink (moved and/or scaled) and the button opens an edit box instead of converting; the edit is laid out at the
+  current scale (k = selection width / recorded width).
 - Edit box (QML over the window, top of the screen): multi-line `TextEdit` in a `Flickable`, Enter = new line, wraps,
   scrolls; xochitl's on-screen keyboard (with the rmpp-korean layout) comes up for it (tested with exp12: Korean typing
   works). OK: delete the selection, lay the text out at the recorded em size from the current position, word-wrapped at
   the original ink width (min 8 em), select the new ink, replace the record. Empty text deletes the ink.
 - Icon: xochitl's own `hwc` ("aa") icon inside a dashed box, composed at run time from `:/ark/icons/hwc` into
-  `ink_convert.svg` (no reMarkable artwork in this repo).
+  `ink_convert.svg` (no reMarkable artwork in this repo). xochitl's Icon needs a plain path; a `file://` URL shows
+  nothing ("Could not find").
+- While recognizing, a "Converting…" box is shown at the top of the screen (closed by `setStatus`; errors stay 2.5 s).
 
 ### Editable text instead of strokes?
 
@@ -97,9 +100,11 @@ edit it in a keyboard dialog, redraw the strokes in place.
 On the tablet `ui/ink.h` lays the text out from `glyphs.json`: em height = line ink height / 0.85, then kept within
 +-15% of the original line width.
 
-Developer feedback (2026-11-10): placement works, but the font strokes look typed. Next, in order: a handwriting-style
-OFL font as the fallback (e.g. a Korean pen font); more own glyphs from practice pages; later a stroke model trained on
-own strokes.
+Developer feedback (2026-11-10): the developer prefers a clean font look over their own handwriting, so the deployed
+`glyphs.json` is font-only (no `--own`). The first tracer left gaps at junctions and split corners; it is now a graph:
+touching junction/end pixels form one node, every edge runs to the node centres, end spurs shorter than 0.04 em are
+dropped, and edges are chained through corners and straight across junctions (raster 160 px; 2,445 glyphs in ~95 s).
+Converted text is drawn with the Fineliner (even width), black, thickness = em / 20 (2..6), whatever pen is current.
 
 ## 3. Files
 
