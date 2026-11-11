@@ -1,0 +1,6 @@
+{
+ "language": "en",
+ "topics": {
+  "english": {"name_en": "Everyday sentences", "name_ko": "일상 문장", "generator": "hand-written", "reviewed": true}
+ }
+}
