@@ -3,8 +3,9 @@
 
   hwr install [--model DIR]  install on the tablet (UI add-on, recognizer, model); again after OS updates
   hwr uninstall [--purge]  remove from the tablet
-  hwr pull [--keep]        fetch practice notebooks + corrected conversions -> hwr-data/collected;
-                           moved conversions are removed from the tablet unless --keep
+  hwr pull [--delete]      fetch practice notebooks (any folder; sidecars also from the tablet's registry) +
+                           corrected conversions -> hwr-data/collected; nothing on the tablet changes unless
+                           --delete (corrected conversions removed, fully written notebooks to the trash)
   hwr practice [N] [--text story|talk|notes|FILE.txt]... [--list]
                            new notebook rmpp-practice-N (N lines, default 100) from the texts, onto the tablet
   hwr practice --v2 [N] [--lang ko|en]
@@ -130,7 +131,7 @@ def cmd_pull(a):
         if not (COLLECTED / "practice" / j.name).exists():
             sidecars += ["--sidecar", str(j)]
     run([py(), "-I", str(COLLECT), "pull", "--host", cfg("RMPP_IP") or TABLET, "--key", str(Path(cfg("RMPP_KEY", "~/.ssh/id_ed25519_rmpp")).expanduser()),
-         "--out", str(COLLECTED), *sidecars, *(["--keep"] if a.keep else [])], env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+         "--out", str(COLLECTED), *sidecars, *(["--delete"] if a.delete else [])], env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     tsv = COLLECTED / "dataset.tsv"
     n = sum(1 for _ in tsv.open(encoding="utf-8")) if tsv.exists() else 0
     print(f"{n} labelled lines in {tsv}")
@@ -172,6 +173,12 @@ def cmd_practice(a):
          "--parent", folder], env=env)
     # relative names: scp would read "C:\..." as a host name
     run(["scp", "-q", "-r", *[p.name for p in stage.iterdir()], f"{TABLET}:{XOCHITL}/"], cwd=stage)
+    # the sidecar (with doc_id from make-doc) goes to the tablet's registry: the tablet lists the notebook and
+    # `hwr pull` on any computer finds its layout
+    side = json.loads(pdf.with_suffix(".json").read_text(encoding="utf-8"))
+    if side.get("doc_id"):
+        ssh(TABLET, f"mkdir -p {DEV_DIR}/practice")
+        run(["scp", "-q", pdf.with_suffix(".json").name, f"{TABLET}:{DEV_DIR}/practice/{side['doc_id']}.json"], cwd=DATA)
     restart_xochitl()
     shutil.rmtree(stage, ignore_errors=True)
     print(f"rmpp-{stem} ({a.count} {'pages' if a.v2 else 'lines'}) is on the tablet, in the folder {FOLDER}/{lang}")
@@ -709,7 +716,10 @@ def cmd_install(a):
             shutil.copy((model / "dict.txt") if (model / "dict.txt").exists() else BASE_MODEL / "dict.txt", st / "dict.txt.new")
             if (model / "model.txt").exists():   # the model's name in Settings > Handwriting
                 shutil.copy(model / "model.txt", st / "model.txt.new")
-        ssh(TABLET, f"mkdir -p {DEV_DIR}")
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import texts                                          # practice texts from this checkout
+        texts.build(st / "texts.tar")
+        ssh(TABLET, f"mkdir -p {DEV_DIR}/practice")
         run(["scp", "-q", *[p.name for p in st.iterdir()], f"{TABLET}:{DEV_DIR}/"], cwd=st)
     names = ["librmpp_hwr.so", "libonnxruntime.so"] + (["glyphs.json"] if glyphs.exists() else []) + \
         (["rec.onnx", "dict.txt"] if model else []) + \
@@ -717,6 +727,8 @@ def cmd_install(a):
     mv = " && ".join(f"mv -f {DEV_DIR}/{n}.new {DEV_DIR}/{n}" for n in names)
     ssh(TABLET, "set -e\n"
                 f"{mv}\n"
+                f"rm -rf {DEV_DIR}/texts.new && mkdir -p {DEV_DIR}/texts.new && tar -xf {DEV_DIR}/texts.tar -C {DEV_DIR}/texts.new\n"
+                f"rm -rf {DEV_DIR}/texts && mv {DEV_DIR}/texts.new {DEV_DIR}/texts && rm -f {DEV_DIR}/texts.tar\n"
                 "mount -o remount,rw /\n"
                 "mkdir -p /usr/lib/rmpp-hwr\n"
                 f"cp {DEV_DIR}/librmpp-hwr-ui.so.new /usr/lib/rmpp-hwr/librmpp-hwr-ui.so.new\n"
@@ -809,8 +821,10 @@ def main():
     for f in (sys.stdout, sys.stderr): f.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(prog="hwr", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
-    p = sp.add_parser("pull", help="collect from the tablet; corrected conversions are then removed there")
-    p.add_argument("--keep", action="store_true", help="leave them on the tablet")
+    p = sp.add_parser("pull", help="collect practice notebooks and corrected conversions from the tablet")
+    p.add_argument("--delete", action="store_true", help="then remove corrected conversions and move fully written "
+                   "practice notebooks to the tablet's trash (one xochitl restart)")
+    p.add_argument("--keep", action="store_true", help=argparse.SUPPRESS)   # the default now
     p.set_defaults(f=cmd_pull)
     p = sp.add_parser("practice", help="new practice notebook rmpp-practice-<count> on the tablet")
     p.add_argument("count", nargs="?", type=int, help="lines to write (default 100); with --v2: pages (default 8)")

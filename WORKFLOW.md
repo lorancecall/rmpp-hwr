@@ -68,14 +68,18 @@ stops recording; Convert page keeps working.
 ## 3. Collect on the PC
 
 ```
-hwr pull           # practice notebooks + corrected conversions -> hwr-data/collected
-hwr pull --keep    # same, but leave the conversions on the tablet
+hwr pull           # practice notebooks + corrected conversions -> hwr-data/collected (tablet unchanged)
+hwr pull --delete  # same, then clean up the tablet (below)
 ```
 
 - Output: `hwr-data/collected/dataset.tsv` (`image path <TAB> text`) and `samples/`. For each conversion:
   `original.rm/png` (handwriting), `converted.txt` (recognized), `corrected.txt` (your text),
   `lines/NN.png`, `pairs.tsv`.
-- Corrected conversions are removed from the tablet after they are on the PC; the PC copy stays.
+- Nothing on the tablet changes unless `--delete`: then corrected conversions are removed from the tablet and
+  fully written practice notebooks go to the tablet's trash (one xochitl restart); the PC copies stay.
+- Practice notebook layouts (sidecars) come from the PC and from the tablet's registry
+  (`/home/root/.local/share/rmpp-hwr/practice/<doc_id>.json`, written by `hwr practice` and by notebooks made
+  on the tablet).
 - Waiting (not corrected) ones stay on the tablet. A record deleted on the tablet before it was pulled is
   removed on the PC too.
 - If the handwriting has a different number of lines from the typed page, lines are matched by content;
