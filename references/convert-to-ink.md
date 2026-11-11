@@ -32,7 +32,8 @@ The page id comes from `DocumentView.currentPageId` (as in Convert page).
 
 The selection handler's drag `MouseArea` emits `doubleClicked` for pen and finger; a double tap on a selection of
 converted ink opens the edit box (on other selections it does nothing). Flipped or rotated ink no longer matches its
-record (aspect ratio) and stays plain ink.
+record (aspect ratio) and stays plain ink. While a resize has flipped the selection (a pending edit with a negative
+size) the double tap does not reach the area; selecting again applies the edit and it works again.
 
 ## 1. How ink gets into a live page
 

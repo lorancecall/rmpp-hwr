@@ -362,12 +362,19 @@ int findInkRecord(const QJsonArray &recs, const QString &page, int n, const QRec
     return -1;
 }
 
-// After new ink is added and selected: measure the selection and store (or replace record `replaceIdx`).
-void recordInk(QPointer<QObject> scp, const QString &page, const QString &text, const Placed &pl, int n, int replaceIdx) {
-    QTimer::singleShot(300, qApp, [=] {
+// After new ink is added and selected: measure the selection and store (or replace record `replaceIdx`). The
+// selection settles after a while (longer for big ink), so measure again until it holds all n new strokes.
+void recordInk(QPointer<QObject> scp, const QString &page, const QString &text, const Placed &pl, int n, int replaceIdx,
+               int attempt = 0) {
+    QTimer::singleShot(attempt == 0 ? 300 : 400, qApp, [=] {
         if (!scp) return;
-        const QRectF r = selectionRect(scp, scp->property("currentLayer").toInt());
-        if (r.isEmpty()) { qWarning("[rmpp-hwr] ink: new ink not selected, not recorded"); return; }
+        const int count = scp->property("selectionItemCount").toInt();
+        const QRectF r = count == n ? selectionRect(scp, scp->property("currentLayer").toInt()) : QRectF();
+        if (r.isEmpty()) {
+            if (attempt < 6) recordInk(scp, page, text, pl, n, replaceIdx, attempt + 1);
+            else qWarning("[rmpp-hwr] ink: new ink not selected (%d of %d), not recorded", count, n);
+            return;
+        }
         QJsonArray recs = readInkRecords();
         if (replaceIdx >= 0 && replaceIdx < recs.size()) recs.removeAt(replaceIdx);
         recs.append(QJsonObject{{QStringLiteral("page"), page}, {QStringLiteral("text"), text},
@@ -554,7 +561,10 @@ void convertSelectionToInk(bool replace, bool editOnly = false) {
         openInkEdit(dv, sc, ph, layer, rec, recs[rec].toObject().value(QStringLiteral("text")).toString());
         return;
     }
-    if (editOnly) return;
+    if (editOnly) {
+        qWarning("[rmpp-hwr] double tap: not converted ink (%d strokes)", sc->property("selectionItemCount").toInt());
+        return;
+    }
     const QImage img = selectionImage();
     if (img.isNull()) { setStatus(QStringLiteral("no selection image"), false); return; }
     setStatus(QStringLiteral("Converting…"), true);
