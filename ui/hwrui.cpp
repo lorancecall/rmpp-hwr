@@ -45,7 +45,7 @@ const char *kPages = "/home/root/.local/share/remarkable/xochitl";
 
 const char *kConf = "/home/root/.config/rmpp-hwr/settings.conf";
 
-// busy, status, command (written by QML), settings hideNative / collect, info modelName / modelInfo / conversions
+// busy, status, command (written by QML), settings hideNative / collect / lassoInk, info modelName / modelInfo / conversions
 QQmlPropertyMap *g_state = nullptr;
 bool g_confLoaded = false;
 
@@ -56,6 +56,7 @@ void loadSettings() {
     g_confLoaded = true;
     QSettings s(QLatin1String(kConf), QSettings::IniFormat);
     g_state->insert(QStringLiteral("hideNative"), s.value(QStringLiteral("hideNative"), false).toBool());
+    g_state->insert(QStringLiteral("lassoInk"), s.value(QStringLiteral("lassoInk"), true).toBool());
     g_state->insert(QStringLiteral("collect"), s.value(QStringLiteral("collect"), true).toBool());
 }
 
@@ -502,6 +503,21 @@ Rectangle {
                     }
                 }
             }
+            ArkControls.Panel {
+                label: "Lasso convert button: " + (hwr.lassoInk ? "Convert to ink" : "Convert to text (built-in)")
+                description: hwr.lassoInk
+                    ? "The convert button under a lasso selection writes the recognized text as ink you can move and resize. Double tap converted ink to edit its text."
+                    : "The convert button under a lasso selection uses reMarkable's own Convert to text."
+                Layout.fillWidth: true
+                action: ArkControls.Toggle {
+                    checked: !!hwr.lassoInk
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -20
+                        onClicked: page.send("set:lassoInk:" + (hwr.lassoInk ? "0" : "1"))
+                    }
+                }
+            }
 
             ArkControls.Title {
                 type: ArkControls.Title.Medium
@@ -822,6 +838,7 @@ QString inkIconUrl() {
 }
 
 void tryInjectInkMenu() {
+    if (!g_state->value(QStringLiteral("lassoInk")).toBool()) return;   // built-in Convert to text
     QQuickItem *menu = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionHandlerMenu"); });
     if (!menu) return;
     QQuickItem *btn = findItem(menu, [](QQuickItem *i) {
@@ -893,6 +910,7 @@ void hwrInit() {
     g_state->insert(QStringLiteral("status"), QString());
     g_state->insert(QStringLiteral("command"), QString());
     g_state->insert(QStringLiteral("hideNative"), false);
+    g_state->insert(QStringLiteral("lassoInk"), true);
     g_state->insert(QStringLiteral("collect"), true);
     g_state->insert(QStringLiteral("inkText"), QString());
     QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
@@ -913,7 +931,7 @@ void hwrInit() {
         }
         else if (cmd.startsWith(QLatin1String("set:"))) {
             const QString name = cmd.section(QLatin1Char(':'), 1, 1);
-            if (name == QLatin1String("hideNative") || name == QLatin1String("collect"))
+            if (name == QLatin1String("hideNative") || name == QLatin1String("collect") || name == QLatin1String("lassoInk"))
                 saveSetting(name, cmd.section(QLatin1Char(':'), 2, 2) == QLatin1String("1"));
         }
     });
