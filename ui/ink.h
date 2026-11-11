@@ -557,7 +557,7 @@ void showInkBusy(QQuickItem *dv) {
 // editOnly: from a double tap on the selection, which only opens the edit box for our own ink (never converts).
 void convertSelectionToInk(bool replace, bool editOnly = false) {
     if (g_state->value(QStringLiteral("busy")).toBool() || g_edit.box) return;
-    if (editOnly && !g_state->value(QStringLiteral("lassoInk")).toBool()) return;
+    if (editOnly && (!g_state->value(QStringLiteral("lassoInk")).toBool() || builtinRecognizer())) return;
     QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
     QObject *sc = dv ? dv->property("sceneController").value<QObject *>() : nullptr;
     QObject *ph = dv ? dv->property("penHandler").value<QObject *>() : nullptr;

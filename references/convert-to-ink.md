@@ -28,6 +28,23 @@ black on white with a 12 px margin and recognized with `rmpp_hwr_recognize` of t
 (no separate library copy needed). `QQuickItem::grabToImage()` on that item crashed xochitl once; do not use it.
 The page id comes from `DocumentView.currentPageId` (as in Convert page).
 
+### Models and "off" (2026-11-11)
+
+Settings > Handwriting lists the deployed model (top level of the data folder) and every `models/<name>/` with
+`rec.onnx` + `dict.txt` (named by `model.txt`, deduplicated against the deployed one), plus "Off". settings.conf
+`model=deployed|<folder>|builtin`; a vanished folder falls back to deployed. The recognizer is reloaded on its next use
+(`rmpp_hwr_close` + `rmpp_hwr_open(dir)`); `ORT_DYLIB_PATH` points onnxruntime at the copy in the data folder, since
+the recognizer otherwise looks for it next to the model.
+
+"Off" means reMarkable's own Convert to text on the lasso button. Convert to ink through reMarkable's recognizer was
+tried and dropped: its lasso conversion deletes the strokes, inserts the text into the page's text flow (only a
+`textPasted(pos, len)` signal; the copied text never reaches the system clipboard) and leaves the undo button
+disabled, so there is no safe way to take its text and give the strokes back.
+
+Pitfall: a key named `model` in the add-on's QQmlPropertyMap (`hwr`) broke xochitl's whole notebook toolbar
+("Required property toolbar was not initialized" for every tool, loaders named `editingToolLoader_undefined`). The
+key is `hwrModel` now; avoid generic names (`model`, `index`, `modelData`) in maps exposed to QML.
+
 ### Double tap
 
 The selection handler's drag `MouseArea` emits `doubleClicked` for pen and finger; a double tap on a selection of

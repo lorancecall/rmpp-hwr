@@ -58,9 +58,10 @@ void loadSettings() {
     g_state->insert(QStringLiteral("hideNative"), s.value(QStringLiteral("hideNative"), false).toBool());
     g_state->insert(QStringLiteral("lassoInk"), s.value(QStringLiteral("lassoInk"), true).toBool());
     g_state->insert(QStringLiteral("collect"), s.value(QStringLiteral("collect"), true).toBool());
+    g_state->insert(QStringLiteral("hwrModel"), s.value(QStringLiteral("model"), QStringLiteral("deployed")).toString());
 }
 
-void saveSetting(const QString &key, bool v) {
+void saveSetting(const QString &key, const QVariant &v) {
     g_state->insert(key, v);
     QDir().mkpath(QFileInfo(QLatin1String(kConf)).path());
     QSettings s(QLatin1String(kConf), QSettings::IniFormat);
@@ -76,11 +77,16 @@ struct Hwr {
     int (*page)(const void *, const char *, char *, size_t) = nullptr;
     int (*text)(const char *, char *, size_t) = nullptr;
     int (*recognize)(const void *, const unsigned char *, unsigned, unsigned, unsigned, char *, size_t, float *) = nullptr;
+    void (*close)(void *) = nullptr;
+    QString recDir;   // model directory the loaded recognizer came from
 };
 Hwr g_hwr;
 
 bool loadLib(QString *err) {
     if (g_hwr.lib) return true;
+    // the recognizer loads onnxruntime next to the model unless ORT_DYLIB_PATH is set; models in models/<name>/ have
+    // no copy of it, so point it at the one installed in kLibDir
+    setenv("ORT_DYLIB_PATH", (QByteArray(kLibDir) + "/libonnxruntime.so").constData(), 0);
     const QByteArray so = QByteArray(kLibDir) + "/librmpp_hwr.so";
     g_hwr.lib = dlopen(so.constData(), RTLD_NOW | RTLD_LOCAL);
     if (!g_hwr.lib) { *err = QString::fromLocal8Bit(dlerror()); return false; }
@@ -88,14 +94,67 @@ bool loadLib(QString *err) {
     g_hwr.page = reinterpret_cast<int (*)(const void *, const char *, char *, size_t)>(dlsym(g_hwr.lib, "rmpp_hwr_page"));
     g_hwr.text = reinterpret_cast<int (*)(const char *, char *, size_t)>(dlsym(g_hwr.lib, "rmpp_hwr_text"));
     g_hwr.recognize = reinterpret_cast<decltype(g_hwr.recognize)>(dlsym(g_hwr.lib, "rmpp_hwr_recognize"));
+    g_hwr.close = reinterpret_cast<void (*)(void *)>(dlsym(g_hwr.lib, "rmpp_hwr_close"));
     return true;
 }
 
+// ---- models (Settings > Handwriting > Recognition) ----
+// "deployed": rec.onnx / dict.txt / model.txt in kLibDir (what `hwr deploy` and the installer write);
+// models/<folder>/ with the same three files: more models to pick from; "builtin": rmpp-hwr's recognizer is off and
+// reMarkable's own recognizer is used. A model is named by the first line of its model.txt (else its folder).
+QString modelName(const QString &dir, const QString &fallback) {
+    QFile f(dir + QStringLiteral("/model.txt"));
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        const QString l = QString::fromUtf8(f.readLine()).trimmed();
+        if (!l.isEmpty()) return l;
+    }
+    return fallback;
+}
+
+struct ModelEntry { QString id, name, dir; };
+
+QList<ModelEntry> listModels() {
+    QList<ModelEntry> out;
+    const QString top = QLatin1String(kLibDir);
+    QString deployedName;
+    if (QFileInfo::exists(top + QStringLiteral("/rec.onnx"))) {
+        deployedName = modelName(top, QStringLiteral("rmpp-hwr-korean-base"));
+        out.append({QStringLiteral("deployed"), deployedName, top});
+    }
+    const QDir models(top + QStringLiteral("/models"));
+    for (const QString &d : models.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
+        const QString dir = models.filePath(d);
+        if (!QFileInfo::exists(dir + QStringLiteral("/rec.onnx")) || !QFileInfo::exists(dir + QStringLiteral("/dict.txt"))) continue;
+        const QString name = modelName(dir, d);
+        if (!deployedName.isEmpty() && name == deployedName) continue;   // the deployed copy is listed once
+        out.append({d, name, dir});
+    }
+    return out;
+}
+
+// The model directory to use now ("" = builtin). A selected model that is gone falls back to the deployed one.
+QString currentModelDir() {
+    const QString sel = g_state->value(QStringLiteral("hwrModel")).toString();
+    if (sel == QLatin1String("builtin")) return QString();
+    for (const ModelEntry &m : listModels())
+        if (m.id == sel) return m.dir;
+    return QLatin1String(kLibDir);
+}
+
+bool builtinRecognizer() { return g_state->value(QStringLiteral("hwrModel")).toString() == QLatin1String("builtin"); }
+
+// Called on a worker thread while busy; a different model selected since the last load is loaded instead.
 bool loadRecognizer(QString *err) {
-    if (g_hwr.rec) return true;
+    const QString dir = currentModelDir();
+    if (dir.isEmpty()) { *err = QStringLiteral("rmpp-hwr recognition is off (Settings > Handwriting)"); return false; }
+    if (g_hwr.rec && g_hwr.recDir == dir) return true;
     if (!loadLib(err)) return false;
     if (!g_hwr.open || !g_hwr.page) { *err = QStringLiteral("symbols missing"); return false; }
-    g_hwr.rec = g_hwr.open(kLibDir);
+    if (g_hwr.rec && g_hwr.close) g_hwr.close(g_hwr.rec);
+    g_hwr.rec = nullptr;
+    g_hwr.recDir = dir;
+    g_hwr.rec = g_hwr.open(dir.toUtf8().constData());
+    qWarning("[rmpp-hwr] model %s: %s", g_hwr.rec ? "loaded" : "failed to load", qPrintable(dir));
     if (!g_hwr.rec) { *err = QStringLiteral("model failed to load"); return false; }
     return true;
 }
@@ -175,15 +234,25 @@ QPair<QString, int> docPage(const QString &doc, const QString &page) {
 }
 
 void refreshInfo() {
-    const QString dir = QLatin1String(kLibDir);
-    QFileInfo m(dir + QStringLiteral("/rec.onnx"));
-    QString name = QStringLiteral("PP-OCRv5 Korean (base model)");
-    QFile nf(dir + QStringLiteral("/model.txt"));   // first line names the installed model, written on deploy
-    if (nf.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        const QString l = QString::fromUtf8(nf.readLine()).trimmed();
-        if (!l.isEmpty()) name = l;
+    QJsonArray models;
+    for (const ModelEntry &e : listModels()) {
+        QFileInfo f(e.dir + QStringLiteral("/rec.onnx"));
+        models.append(QJsonObject{{QStringLiteral("id"), e.id}, {QStringLiteral("name"), e.name},
+                                  {QStringLiteral("info"), QStringLiteral("%1 MB, %2").arg(f.size() / 1048576.0, 0, 'f', 1)
+                                      .arg(f.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm")))
+                                      + (e.id == QLatin1String("deployed") ? QStringLiteral(", deployed") : QString())}});
     }
-    g_state->insert(QStringLiteral("modelName"), m.exists() ? name : QStringLiteral("Model not installed"));
+    g_state->insert(QStringLiteral("modelList"), QString::fromUtf8(QJsonDocument(models).toJson(QJsonDocument::Compact)));
+    // the model in use (id as resolved: a vanished selection shows as the deployed one)
+    const QString cur = currentModelDir();
+    QString curId = QStringLiteral("builtin");
+    for (const ModelEntry &e : listModels()) if (e.dir == cur) curId = e.id;
+    g_state->insert(QStringLiteral("modelInUse"), curId);
+    const QString dir = cur.isEmpty() ? QLatin1String(kLibDir) : cur;
+    QFileInfo m(dir + QStringLiteral("/rec.onnx"));
+    const QString name = modelName(dir, QStringLiteral("rmpp-hwr-korean-base"));
+    g_state->insert(QStringLiteral("modelName"), cur.isEmpty() ? QStringLiteral("reMarkable built-in")
+                                                 : m.exists() ? name : QStringLiteral("Model not installed"));
     g_state->insert(QStringLiteral("modelInfo"), m.exists()
         ? QStringLiteral("%1 MB, installed %2").arg(m.size() / 1048576.0, 0, 'f', 1)
               .arg(m.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm")))
@@ -411,7 +480,7 @@ import xofm.libs.toolbar
 ToolbarTool {
     objectName: "rmppHwrButton"
     type: ToolbarTool.Type.FoldoutButton
-    shouldShow: toolbar.notePage
+    shouldShow: toolbar.notePage && hwr.hwrModel !== "builtin"
     label: hwr.busy ? "Converting…" : "Convert page"
     iconSource: "qrc:/ark/icons/hwc"
     onClicked: hwr.command = "page#" + Date.now()
@@ -619,9 +688,27 @@ Rectangle {
                 Layout.fillWidth: true
             }
             ArkControls.Panel {
-                label: hwr.modelName || ""
-                description: hwr.modelInfo || ""
+                label: "Recognition: " + (hwr.modelName || "")
+                description: hwr.modelInUse === "builtin"
+                    ? "rmpp-hwr's recognizer is off: the lasso button is reMarkable's own Convert to text, Convert page is hidden."
+                    : "Used by Convert page and Convert to ink. Add models in models/<name>/ (rec.onnx, dict.txt, model.txt)."
                 Layout.fillWidth: true
+            }
+            Repeater {
+                model: { try { return JSON.parse(hwr.modelList || "[]").concat([{ id: "builtin", name: "Off: reMarkable built-in recognizer", info: "rmpp-hwr off: reMarkable's own Convert to text only" }]); } catch (e) { return []; } }
+                delegate: ArkControls.Panel {
+                    required property var modelData
+                    label: modelData.name
+                    description: modelData.info || ""
+                    Layout.fillWidth: true
+                    Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                    action: ArkControls.Button {
+                        text: hwr.modelInUse === modelData.id ? "In use" : "Use"
+                        enabled: hwr.modelInUse !== modelData.id
+                        type: ArkTokens.Button.secondary
+                        onClicked: page.send("model:" + modelData.id)
+                    }
+                }
             }
         }
     }
@@ -844,7 +931,7 @@ QString inkIconUrl() {
 }
 
 void tryInjectInkMenu() {
-    if (!g_state->value(QStringLiteral("lassoInk")).toBool()) return;   // built-in Convert to text
+    if (!g_state->value(QStringLiteral("lassoInk")).toBool() || builtinRecognizer()) return;   // built-in Convert to text
     QQuickItem *menu = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionHandlerMenu"); });
     if (!menu) return;
     QQuickItem *btn = findItem(menu, [](QQuickItem *i) {
@@ -916,6 +1003,7 @@ void hwrInit() {
     g_state->insert(QStringLiteral("status"), QString());
     g_state->insert(QStringLiteral("command"), QString());
     g_state->insert(QStringLiteral("hideNative"), false);
+    g_state->insert(QStringLiteral("hwrModel"), QStringLiteral("deployed"));
     g_state->insert(QStringLiteral("lassoInk"), true);
     g_state->insert(QStringLiteral("collect"), true);
     g_state->insert(QStringLiteral("inkText"), QString());
@@ -934,6 +1022,15 @@ void hwrInit() {
         else if (cmd.startsWith(QLatin1String("mark:"))) {
             markRecord(cmd.mid(7), cmd.mid(5, 1) == QLatin1String("1"));
             updateCurrentPage();
+        }
+        else if (cmd.startsWith(QLatin1String("model:"))) {
+            // settings.conf key "model"; in the QML map it is "hwrModel": a map key named "model" broke xochitl's
+            // toolbar (tools failed with "Required property toolbar was not initialized")
+            g_state->insert(QStringLiteral("hwrModel"), cmd.mid(6));
+            QSettings st(QLatin1String(kConf), QSettings::IniFormat);
+            st.setValue(QStringLiteral("model"), cmd.mid(6));
+            st.sync();
+            refreshInfo();   // the recognizer reloads with the new model on its next use
         }
         else if (cmd.startsWith(QLatin1String("set:"))) {
             const QString name = cmd.section(QLatin1Char(':'), 1, 1);

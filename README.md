@@ -11,6 +11,10 @@ On the tablet:
   again) to **edit the text** in a keyboard box (Korean works with rmpp-korean); OK redraws it in place, wrapped at
   its width. Settings > Handwriting switches the lasso button back to reMarkable's own Convert to text.
 - **Convert page** (toolbar, next to Convert to text): recognizes the whole page and types it on a new page.
+- **Models** (Settings > Handwriting): pick the recognition model. The deployed model is `rec.onnx`/`dict.txt`/
+  `model.txt` in `/home/root/.local/share/rmpp-hwr/`; more models go in `models/<name>/` with the same three files
+  and are listed by the first line of their `model.txt`. "Off" turns rmpp-hwr's recognizer off: the lasso button is
+  reMarkable's own Convert to text and Convert page is hidden.
 
 > Status: experimental. rmpp-hwr is installed and updated with its own PC tool (`hwr install`), not as a Vellum
 > package, because models change often. It only needs `rmpp-preload` from
