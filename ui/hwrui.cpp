@@ -57,6 +57,7 @@ void loadSettings() {
     QSettings s(QLatin1String(kConf), QSettings::IniFormat);
     g_state->insert(QStringLiteral("hideNative"), s.value(QStringLiteral("hideNative"), false).toBool());
     g_state->insert(QStringLiteral("lassoInk"), s.value(QStringLiteral("lassoInk"), true).toBool());
+    g_state->insert(QStringLiteral("inkStyle"), s.value(QStringLiteral("inkStyle"), QStringLiteral("own")).toString());
     g_state->insert(QStringLiteral("collect"), s.value(QStringLiteral("collect"), true).toBool());
     g_state->insert(QStringLiteral("hwrModel"), s.value(QStringLiteral("model"), QStringLiteral("deployed")).toString());
 }
@@ -242,6 +243,7 @@ void refreshInfo() {
                                       .arg(f.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm")))
                                       + (e.id == QLatin1String("deployed") ? QStringLiteral(", deployed") : QString())}});
     }
+    g_state->insert(QStringLiteral("hasOwnGlyphs"), QFileInfo::exists(QLatin1String(kLibDir) + QStringLiteral("/glyphs_own.json")));
     g_state->insert(QStringLiteral("modelList"), QString::fromUtf8(QJsonDocument(models).toJson(QJsonDocument::Compact)));
     // the model in use (id as resolved: a vanished selection shows as the deployed one)
     const QString cur = currentModelDir();
@@ -569,6 +571,22 @@ Rectangle {
                         anchors.fill: parent
                         anchors.margins: -20
                         onClicked: page.send("set:hideNative:" + (hwr.hideNative ? "0" : "1"))
+                    }
+                }
+            }
+            ArkControls.Panel {
+                visible: !!hwr.hasOwnGlyphs
+                label: "Ink handwriting: " + (hwr.inkStyle === "own" ? "My handwriting" : "Font")
+                description: hwr.inkStyle === "own"
+                    ? "Convert to ink writes with your own characters (from your practice pages); missing ones come from the font."
+                    : "Convert to ink writes with the font (Noto Sans KR)."
+                Layout.fillWidth: true
+                action: ArkControls.Toggle {
+                    checked: hwr.inkStyle === "own"
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -20
+                        onClicked: page.send("style:" + (hwr.inkStyle === "own" ? "font" : "own"))
                     }
                 }
             }
@@ -1005,6 +1023,8 @@ void hwrInit() {
     g_state->insert(QStringLiteral("hideNative"), false);
     g_state->insert(QStringLiteral("hwrModel"), QStringLiteral("deployed"));
     g_state->insert(QStringLiteral("lassoInk"), true);
+    g_state->insert(QStringLiteral("inkStyle"), QStringLiteral("own"));
+    g_state->insert(QStringLiteral("hasOwnGlyphs"), false);
     g_state->insert(QStringLiteral("collect"), true);
     g_state->insert(QStringLiteral("inkText"), QString());
     QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
@@ -1022,6 +1042,9 @@ void hwrInit() {
         else if (cmd.startsWith(QLatin1String("mark:"))) {
             markRecord(cmd.mid(7), cmd.mid(5, 1) == QLatin1String("1"));
             updateCurrentPage();
+        }
+        else if (cmd.startsWith(QLatin1String("style:"))) {
+            saveSetting(QStringLiteral("inkStyle"), cmd.mid(6));   // glyphs reload on the next conversion
         }
         else if (cmd.startsWith(QLatin1String("model:"))) {
             // settings.conf key "model"; in the QML map it is "hwrModel": a map key named "model" broke xochitl's

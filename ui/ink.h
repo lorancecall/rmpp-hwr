@@ -26,9 +26,23 @@ struct Glyph {
 QHash<QChar, Glyph> g_glyphs;
 
 // glyphs.json (ink/glyphs.py build): {"glyphs": {char: {"adv", "strokes": [[x, y, ...]]}}}, em units, y down.
+// Ink handwriting (Settings > Handwriting): "font" uses glyphs.json (release asset), "own" uses glyphs_own.json, the
+// writer's own characters built on the PC by ink/own.py and copied only to their tablet (personal data: never in the
+// repository or a release). Falls back to glyphs.json when glyphs_own.json is missing.
+QString g_glyphsFile;   // the file g_glyphs was loaded from
+
+QString glyphsFile() {
+    const QString own = QLatin1String(kLibDir) + QStringLiteral("/glyphs_own.json");
+    if (g_state->value(QStringLiteral("inkStyle")).toString() == QLatin1String("own") && QFileInfo::exists(own)) return own;
+    return QLatin1String(kLibDir) + QStringLiteral("/glyphs.json");
+}
+
 bool loadGlyphs() {
-    if (!g_glyphs.isEmpty()) return true;
-    QFile f{QLatin1String(kLibDir) + QStringLiteral("/glyphs.json")};
+    const QString file = glyphsFile();
+    if (!g_glyphs.isEmpty() && g_glyphsFile == file) return true;
+    g_glyphs.clear();
+    g_glyphsFile = file;
+    QFile f{file};
     if (!f.open(QIODevice::ReadOnly)) return false;
     const QJsonObject gs = QJsonDocument::fromJson(f.readAll()).object().value(QStringLiteral("glyphs")).toObject();
     for (auto it = gs.begin(); it != gs.end(); ++it) {

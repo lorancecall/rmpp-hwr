@@ -45,6 +45,17 @@ Pitfall: a key named `model` in the add-on's QQmlPropertyMap (`hwr`) broke xochi
 ("Required property toolbar was not initialized" for every tool, loaders named `editingToolLoader_undefined`). The
 key is `hwrModel` now; avoid generic names (`model`, `index`, `modelData`) in maps exposed to QML.
 
+### My handwriting (2026-11-11)
+
+`ink/own.py build` makes `glyphs_own.json` from the writer's collected strokes (personal data: built on the PC,
+copied only to the writer's tablet as `/home/root/.local/share/rmpp-hwr/glyphs_own.json`, never committed or
+released). Per character, best first: practice v2 cells; characters cut out of practice lines (words split into
+blobs by x overlap, a word used only when its blobs match its characters one to one, each cut-out kept only if the
+recognizer CLI reads it back as its label, look-alikes such as l/1 and o/0 allowed); Hangul composed from own
+syllables (initial+medial strokes of one, final consonant of another, e.g. 녕 = 념 without ㅁ + the ㅇ of 경);
+then the font. With the current data: 205 cells, 70 from lines, 513 composed, of 2,445. Settings > Handwriting
+"Ink handwriting" picks My handwriting or Font (shown when the file exists).
+
 ### Double tap
 
 The selection handler's drag `MouseArea` emits `doubleClicked` for pen and finger; a double tap on a selection of
