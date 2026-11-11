@@ -576,6 +576,7 @@ import ark.tokens as ArkTokens
 import ark.controls as ArkControls
 ArkControls.SidebarItem {
     objectName: "rmppHwrSidebarItem"
+    property int rmppOrder: 400   // Settings rail order shared by the rmpp add-ons (see railOrder)
     readonly property int hwrPage: 1001
     type: ArkTokens.Sidebar.primary
     text: settingsRoot.showLabels ? "Handwriting" : ""
@@ -945,9 +946,44 @@ QObject *createInline(QQmlEngine *eng, QQmlContext *ctx, const char *qml, const 
 
 #include "ink.h"
 
-// Settings > Handwriting: a sidebar row below Bluetooth (or Wi-Fi) and the page over the payload area.
+// ---- Settings rail order shared by the rmpp add-ons ----
+// Every rmpp row carries an int property "rmppOrder" and goes after xochitl's Wi-Fi row, sorted by it:
+//   rmpp-bt 100 (Bluetooth), rmpp-tailscale 200, rmpp-lang 300 (Languages), rmpp-hwr 400 (Handwriting).
+// Rows without the property are recognised by class / objectName. Each add-on places only its own row: after the
+// rmpp row with the highest order below its own, else after Wi-Fi, so the order is the same whoever injects first.
+int railOrder(QQuickItem *k) {
+    const QVariant v = k->property("rmppOrder");
+    if (v.isValid()) return v.toInt();
+    const char *cls = k->metaObject()->className();
+    if (qstrncmp(cls, "BtSidebarItem", 13) == 0) return 100;
+    if (qstrncmp(cls, "TsSidebarItem", 13) == 0) return 200;
+    if (k->objectName() == QLatin1String("rmppLangSidebarItem")) return 300;
+    if (k->objectName() == QLatin1String("rmppHwrSidebarItem")) return 400;
+    return -1;
+}
+
+void placeRailRow(QQuickItem *col, QQuickItem *row) {
+    const int mine = railOrder(row);
+    QQuickItem *after = nullptr, *wifi = nullptr;
+    int best = -1;
+    for (QQuickItem *k : col->childItems()) {
+        if (k == row) continue;
+        if (k->property("iconSource").toString().contains(QLatin1String("/wifi"))) wifi = k;
+        const int o = railOrder(k);
+        if (o >= 0 && o < mine && o > best) { best = o; after = k; }
+    }
+    if (!after) after = wifi;
+    if (!after) return;
+    const auto kids = col->childItems();
+    if (kids.indexOf(row) != kids.indexOf(after) + 1) row->stackAfter(after);   // only when out of place
+}
+
+QPointer<QQuickItem> g_railCol, g_railRow;
+
+// Settings > Handwriting: a sidebar row in the shared rail order and the page over the payload area.
 void tryInjectSettings() {
     QQuickItem *col = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("settingsColumn"); });
+    if (col && col == g_railCol && g_railRow) placeRailRow(col, g_railRow);   // other add-ons' rows may come later
     if (!col || col->property("_rmppHwr").toBool()) return;
     QQuickItem *settings = col;
     while (settings && settings->objectName() != QLatin1String("Settings")) settings = settings->parentItem();
@@ -962,13 +998,9 @@ void tryInjectSettings() {
     ctx->setContextProperty(QStringLiteral("payloadLoaderRef"), loader);
     auto *row = qobject_cast<QQuickItem *>(createInline(eng, ctx, kSidebarQml, "Sidebar", col));
     if (row) {
-        QQuickItem *after = nullptr;
-        for (QQuickItem *k : col->childItems()) {
-            const QString icon = k->property("iconSource").toString();
-            if (icon.contains(QLatin1String("bluetooth"))) after = k;
-            else if (!after && icon.contains(QLatin1String("wifi"))) after = k;
-        }
-        if (after) row->stackAfter(after);
+        g_railCol = col;
+        g_railRow = row;
+        placeRailRow(col, row);
     }
     QObject *page = createInline(eng, ctx, kPageQml, "Page", settings);
     qWarning("[rmpp-hwr] settings: row=%s page=%s", row ? "ok" : "FAILED", page ? "ok" : "FAILED");
