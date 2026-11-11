@@ -100,12 +100,14 @@ used for training, so models are compared fairly. Lower is better. The base mode
 ## 6. Install it
 
 ```
-hwr deploy my-v2       # install on the tablet (the old one is kept)
+hwr deploy my-v2       # install training run my-v2 on the tablet (the old one is kept)
 hwr rollback           # go back to the previous model
 ```
 
-Settings > Handwriting > Model then shows "My handwriting my-v2 (error NN%)". Only deploy a model that
-scores lower than the one on the tablet.
+Each deployed model gets the next version name, `rmpp-hwr-korean-v1`, `-v2`, ...; the training run it came from
+is recorded in `hwr-train/out/releases.json` (`hwr models` lists both). Settings > Handwriting > Model then shows
+"rmpp-hwr-korean-v3 (error NN%)". The base model is `rmpp-hwr-korean-base`. Only deploy a model that scores lower
+than the one on the tablet.
 
 ## Status (2026-11-10)
 

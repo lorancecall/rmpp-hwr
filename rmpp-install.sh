@@ -12,7 +12,9 @@ done
 cp glyphs.json "$D/glyphs.json.new" && mv -f "$D/glyphs.json.new" "$D/glyphs.json"   # strokes for Convert to ink
 rm -f "$D/librmpp_hwr_ink.so"               # left over from the Convert to ink prototype
 if [ ! -f "$D/rec.onnx" ]; then            # keep a personal model that was deployed with `hwr deploy`
-	for f in rec.onnx dict.txt; do cp "$f" "$D/$f.new" && mv -f "$D/$f.new" "$D/$f"; done
+	for f in rec.onnx dict.txt model.txt; do
+		if [ -f "$f" ]; then cp "$f" "$D/$f.new" && mv -f "$D/$f.new" "$D/$f"; fi
+	done
 fi
 # never `systemctl stop xochitl` (it powers the tablet off); reset-failed avoids the restart limit
 mount -o remount,rw /

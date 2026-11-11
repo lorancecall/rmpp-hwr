@@ -1,0 +1,1 @@
+rmpp-hwr-korean-base (PaddleOCR PP-OCRv5 Korean mobile)
