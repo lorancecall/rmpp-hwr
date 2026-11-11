@@ -10,7 +10,9 @@ for f in librmpp_hwr.so libonnxruntime.so; do
 	cp "$f" "$D/$f.new" && mv -f "$D/$f.new" "$D/$f"
 done
 if [ ! -f "$D/rec.onnx" ]; then            # keep a personal model that was deployed with `hwr deploy`
-	for f in rec.onnx dict.txt; do cp "$f" "$D/$f.new" && mv -f "$D/$f.new" "$D/$f"; done
+	for f in rec.onnx dict.txt model.txt; do
+		if [ -f "$f" ]; then cp "$f" "$D/$f.new" && mv -f "$D/$f.new" "$D/$f"; fi
+	done
 fi
 # never `systemctl stop xochitl` (it powers the tablet off); reset-failed avoids the restart limit
 mount -o remount,rw /

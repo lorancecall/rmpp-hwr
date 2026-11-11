@@ -12,7 +12,8 @@
   hwr status               training jobs and the last lines of the newest log
   hwr fetch NAME           download export/NAME/rec.onnx -> hwr-train/out/NAME, then eval it
   hwr eval [NAME]          error rate (CER) of a model on your eval lines; no NAME = the model on the tablet
-  hwr deploy NAME          install hwr-train/out/NAME on the tablet (keeps the old model for rollback)
+  hwr deploy NAME [--as V] install hwr-train/out/NAME on the tablet as the next rmpp-hwr-korean-vN
+                           (keeps the old model for rollback; versions in hwr-train/out/releases.json)
   hwr rollback             put the previous model back on the tablet
   hwr models               list downloaded models and their eval results
   hwr sync                 copy train/ (jobs, scripts) and the backend settings to the work dir
@@ -76,6 +77,20 @@ def need(key):
 
 
 TABLET = cfg("RMPP_HOST", "rmpp")
+TABLET_CMDS = {"pull", "practice", "eval", "deploy", "rollback", "models", "install", "uninstall"}
+
+
+def pick_tablet():
+    """Use RMPP_HOST, or RMPP_HOST_ALT (e.g. a Tailscale ssh alias) when the first one does not answer."""
+    global TABLET
+    alt = cfg("RMPP_HOST_ALT")
+    if not alt or alt == TABLET:
+        return
+    probe = lambda h: subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", h, "true"],
+                                     capture_output=True).returncode == 0
+    if not probe(TABLET) and probe(alt):
+        print(f"{TABLET} does not answer; using {alt}", file=sys.stderr)
+        TABLET = alt
 DEV_DIR = "/home/root/.local/share/rmpp-hwr"
 XOCHITL = "/home/root/.local/share/remarkable/xochitl"
 EVAL_DOC = cfg("HWR_EVAL_DOC")                              # its first EVAL_N lines are never trained on
@@ -566,11 +581,13 @@ def cmd_eval(a):
 
 
 def cmd_models(a):
+    names = {v.get("run"): k for k, v in releases().items()}
     for d in sorted(OUT.glob("*/rec.onnx")):
         j = d.parent / "eval.json"
         r = json.loads(j.read_text(encoding="utf-8")) if j.exists() else {}
-        print(f"{d.parent.name:24} eval {r.get('eval12', float('nan')):.3f}  all {r.get('all', float('nan')):.3f}")
-    print(ssh(TABLET, f"echo tablet: $(head -1 {DEV_DIR}/model.txt 2>/dev/null || echo base model)", capture=True).strip())
+        print(f"{d.parent.name:16} {names.get(d.parent.name, ''):22} eval {r.get('eval12', float('nan')):.3f}  "
+              f"all {r.get('all', float('nan')):.3f}")
+    print(ssh(TABLET, f"echo tablet: $(head -n 1 {DEV_DIR}/model.txt 2>/dev/null || echo base model)", capture=True).strip())
 
 
 # ---- install on the tablet ----
@@ -610,9 +627,12 @@ def cmd_install(a):
         if model:
             shutil.copy(model / "rec.onnx", st / "rec.onnx.new")
             shutil.copy((model / "dict.txt") if (model / "dict.txt").exists() else BASE_MODEL / "dict.txt", st / "dict.txt.new")
+            if (model / "model.txt").exists():   # the model's name in Settings > Handwriting
+                shutil.copy(model / "model.txt", st / "model.txt.new")
         ssh(TABLET, f"mkdir -p {DEV_DIR}")
         run(["scp", "-q", *[p.name for p in st.iterdir()], f"{TABLET}:{DEV_DIR}/"], cwd=st)
-    names = ["librmpp_hwr.so", "libonnxruntime.so"] + (["rec.onnx", "dict.txt"] if model else [])
+    names = ["librmpp_hwr.so", "libonnxruntime.so"] + (["rec.onnx", "dict.txt"] if model else []) + \
+        (["model.txt"] if model and (model / "model.txt").exists() else [])
     mv = " && ".join(f"mv -f {DEV_DIR}/{n}.new {DEV_DIR}/{n}" for n in names)
     ssh(TABLET, "set -e\n"
                 f"{mv}\n"
@@ -649,12 +669,36 @@ def cmd_uninstall(a):
 
 
 # ---- tablet model ----
+MODEL_NAME = "rmpp-hwr-korean"          # base model: rmpp-hwr-korean-base; personal models: -v1, -v2, ...
+RELEASES = OUT / "releases.json"          # {"rmpp-hwr-korean-v2": {"run": "fix3", "eval12": ..., "time": ...}}
+
+
+def releases():
+    return json.loads(RELEASES.read_text(encoding="utf-8")) if RELEASES.exists() else {}
+
+
+def release_name(run_name):
+    """The version name of a training run: the one it was deployed under before, else the next free vN."""
+    rel = releases()
+    for k, v in rel.items():
+        if v.get("run") == run_name:
+            return k
+    n = max([int(k.rsplit("-v", 1)[1]) for k in rel if re.search(r"-v\d+$", k)] or [0]) + 1
+    return f"{MODEL_NAME}-v{n}"
+
+
 def cmd_deploy(a):
     d = OUT / a.name
     if not (d / "rec.onnx").exists():
         sys.exit(f"no model at {d}: run `hwr fetch {a.name}`")
     r = json.loads((d / "eval.json").read_text(encoding="utf-8")) if (d / "eval.json").exists() else {}
-    desc = f"My handwriting {a.name}" + (f" (error {r['eval12'] * 100:.0f}%)" if "eval12" in r else "")
+    ver = a.as_ or release_name(a.name)
+    desc = ver + (f" (error {r['eval12'] * 100:.0f}%)" if "eval12" in r else "")
+    rel = releases()
+    rel[ver] = {"run": a.name, **({"eval12": r["eval12"]} if "eval12" in r else {}),
+                "time": dt.datetime.now().strftime("%Y-%m-%d")}
+    OUT.mkdir(parents=True, exist_ok=True)
+    RELEASES.write_text(json.dumps(rel, indent=1) + "\n", encoding="utf-8")
     backup_tablet()
     with tempfile.TemporaryDirectory() as t:
         (Path(t) / "model.txt").write_text(desc + "\n", encoding="utf-8")
@@ -700,7 +744,10 @@ def main():
     p = sp.add_parser("status"); p.add_argument("--lines", type=int, default=3); p.set_defaults(f=cmd_status)
     p = sp.add_parser("fetch"); p.add_argument("name"); p.set_defaults(f=cmd_fetch)
     p = sp.add_parser("eval"); p.add_argument("name", nargs="?"); p.set_defaults(f=cmd_eval)
-    p = sp.add_parser("deploy"); p.add_argument("name"); p.set_defaults(f=cmd_deploy)
+    p = sp.add_parser("deploy", help="install a trained model on the tablet as the next rmpp-hwr-korean-vN")
+    p.add_argument("name", help="training run (hwr-train/out/NAME)")
+    p.add_argument("--as", dest="as_", help="version name to use instead of the next rmpp-hwr-korean-vN")
+    p.set_defaults(f=cmd_deploy)
     sp.add_parser("rollback").set_defaults(f=cmd_rollback)
     sp.add_parser("models").set_defaults(f=cmd_models)
     p = sp.add_parser("install", help="install rmpp-hwr on the tablet (needs rmpp-preload)")
@@ -725,6 +772,8 @@ def main():
     p.add_argument("--name", help="job name (default: the job file name)")
     p.set_defaults(f=cmd_job)
     a = ap.parse_args()
+    if a.cmd in TABLET_CMDS:
+        pick_tablet()
     a.f(a)
 
 
