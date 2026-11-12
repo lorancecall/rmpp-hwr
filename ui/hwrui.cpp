@@ -1058,9 +1058,42 @@ QObject *createInline(QQmlEngine *eng, QQmlContext *ctx, const char *qml, const 
 #include "practicenb.h"
 #include "conversions.h"
 
+// The passcode screen is up: a window's focus is on its pin keyboard, or a passcode/pincode item is visible.
+bool passcodeScreenUp() {
+    for (QWindow *w : QGuiApplication::allWindows())
+        if (auto *qw = qobject_cast<QQuickWindow *>(w))
+            if (qw->isVisible() && qw->activeFocusItem() && QByteArray(qw->activeFocusItem()->metaObject()->className()).contains("Pin"))
+                return true;
+    return findAnywhere([](QQuickItem *i) {
+        if (!i->isVisible()) return false;
+        const QByteArray c = i->metaObject()->className();
+        return c.contains("Passcode") || c.contains("Pincode") || c.contains("PinKeyboard");
+    }) != nullptr;
+}
+
+void tryInjectHelpers();
+QPointer<QObject> g_practiceHelper, g_convHelper;
+
+// The add-on touches xochitl's UI only after unlock: right after a restart, work on the passcode screen (QML compiles,
+// item walks, injected items) left heavy ghosting there (2026-11-12). Ready once the passcode screen is gone and
+// xochitl's library module is registered (the helpers can be created; that happens at unlock), or 60 s after the
+// passcode screen is gone if the module never comes (another OS version).
+bool uiReady() {
+    static bool ready = false;
+    static int clearTicks = 0;
+    if (ready) return true;
+    if (passcodeScreenUp()) { clearTicks = 0; return false; }
+    ++clearTicks;
+    tryInjectHelpers();
+    if ((g_practiceHelper && g_convHelper) || clearTicks > 40) {
+        ready = true;
+        qWarning("[rmpp-hwr] UI ready (%s)", g_practiceHelper && g_convHelper ? "unlocked" : "without library helpers");
+    }
+    return ready;
+}
+
 // Helpers that need xochitl's QML engine but no screen of their own (practice import, conversion copies). The module
 // xofm.libs.library is registered a few seconds after start: tried on every timer tick until both are created.
-QPointer<QObject> g_practiceHelper, g_convHelper;
 int g_helperTries = 0;
 void tryInjectHelpers() {
     if (g_practiceHelper && g_convHelper) return;
@@ -1463,7 +1496,9 @@ void hwrInit() {
         }
     });
     auto *t = new QTimer(app);
-    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectHelpers(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage();
+    QObject::connect(t, &QTimer::timeout, app, [] {
+        if (!uiReady()) return;   // nothing UI-side before the passcode screen is gone (ghosting there)
+        loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage();
 #ifdef RMPP_HWR_DEV
         watchCmdFile();
 #endif
