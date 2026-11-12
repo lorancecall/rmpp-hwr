@@ -625,9 +625,11 @@ bool applyInkEdit(const InkEdit &e) {
     // the ink may have been scaled since: k = its size now / when recorded
     const double k = sel.width() / qMax(1.0, r.value(QStringLiteral("w")).toDouble());
     const QPointF origin = sel.topLeft() + QPointF(r.value(QStringLiteral("ox")).toDouble(), r.value(QStringLiteral("oy")).toDouble()) * k;
-    // wrap at the width of the ink being edited (at least 8 em), so longer text grows downwards
+    // wrap only at the page's right edge (scene x = .rm x, centred: the page is -810..810), at least 8 em wide.
+    // Wrapping at the ink's own width broke lines that fitted before: a conversion sizes each line like its
+    // handwriting, the edit uses one size for all, and the width scaled with the size (2026-11-12).
     const double em = r.value(QStringLiteral("em")).toDouble() * k * size;
-    const double maxW = qMax((sel.width() - r.value(QStringLiteral("ox")).toDouble() * k) * size, em * 8);
+    const double maxW = qMax(810.0 - 40.0 - origin.x(), em * 8);
     Placed pl = placeText(text, origin, em, maxW);
     pl.weight = weight;
     if (text.isEmpty()) {   // empty text: just delete the ink
