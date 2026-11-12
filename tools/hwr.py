@@ -19,7 +19,7 @@
   hwr fetch NAME           download export/NAME/rec.onnx -> hwr-train/out/NAME, then eval it
   hwr eval [NAME]          error rate (CER) of a model on your eval lines; no NAME = the model on the tablet
   hwr deploy NAME [--as V] install hwr-train/out/NAME on the tablet as the next rmpp-hwr-korean-v0.N
-                           (keeps the old model for rollback; versions in hwr-train/out/releases.json)
+                           (replaces older models of the language; `hwr rollback` goes one step back; versions in hwr-train/out/releases.json)
   hwr rollback             put the previous model back on the tablet
   hwr models               list downloaded models and their eval results
   hwr sync                 copy train/ (jobs, scripts) and the backend settings to the work dir
@@ -802,8 +802,14 @@ def cmd_deploy(a):
     # keep every deployed version under models/<version>/ so Settings > Handwriting can switch between them;
     # pack.json tells the picker which language group the model belongs to
     ssh(TABLET, f"cd {DEV_DIR} && mkdir -p models/{ver} && cp rec.onnx dict.txt model.txt pack.json models/{ver}/")
+    # The new version replaces the older ones of the same language (models/<id>/ whose pack.json names MODEL_LANG);
+    # packs of other languages stay. rec.onnx.prev (backup_tablet) still allows one `hwr rollback`.
+    gone = ssh(TABLET, f"cd {DEV_DIR}/models && for d in */; do d=${{d%/}}; [ \"$d\" = '{ver}' ] && continue; "
+                       f"grep -qE '\"language\": *\"{MODEL_LANG}\"' \"$d/pack.json\" 2>/dev/null && rm -rf \"$d\" && echo $d; "
+                       "done; true", capture=True).split()
     restart_xochitl()   # the recognizer caches the model after first use
-    print(f"installed: {desc} (also kept in {DEV_DIR}/models/{ver})")
+    print(f"installed: {desc} (also kept in {DEV_DIR}/models/{ver})"
+          + (f"; removed older {MODEL_LANG} models: {', '.join(gone)}" if gone else ""))
 
 
 def backup_tablet():
