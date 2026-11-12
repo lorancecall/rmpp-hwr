@@ -68,7 +68,8 @@ void loadSettings() {
     if (conv.isEmpty()) conv = s.contains(QStringLiteral("model")) && s.value(QStringLiteral("model")).toString() != QLatin1String("builtin")
         ? QStringLiteral("rmpp") : QStringLiteral("remarkable");
     g_state->insert(QStringLiteral("converter"), conv);
-    g_state->insert(QStringLiteral("collect"), s.value(QStringLiteral("collect"), true).toBool());
+    // Save conversions (copies converted pages into hwr-db/<lang>/Conversions): off until turned on
+    g_state->insert(QStringLiteral("collect"), s.value(QStringLiteral("collect"), false).toBool());
     // Lasso convert: typed text (default) or a text object (ink in the language's font; v0.2's lassoInk=true).
     g_state->insert(QStringLiteral("textObject"), s.value(QStringLiteral("textObject"), s.value(QStringLiteral("lassoInk"), false)).toBool());
     g_state->insert(QStringLiteral("lassoReplace"), s.value(QStringLiteral("lassoReplace"), false).toBool());
@@ -456,26 +457,11 @@ void typeText(const QStringList &lines) {
     setStatus(QString(), false);
 }
 
-// One JSON line per conversion: the handwritten source page (original), the recognized lines (converted) and
-// the page they were typed on, whose text the user may correct later (corrected). Collected over SSH for training.
-void logConversion(const QString &doc, const QString &src, const QString &dst, const QStringList &lines,
-                   const QString &ink) {
-    if (!g_state->value(QStringLiteral("collect")).toBool()) {
-        if (!ink.isEmpty()) QFile::remove(QLatin1String(kLibDir) + QLatin1Char('/') + ink);
-        return;
-    }
-    QDir().mkpath(QLatin1String(kLibDir));
-    QFile f(QStringLiteral("%1/conversions.jsonl").arg(QLatin1String(kLibDir)));
-    if (!f.open(QIODevice::Append | QIODevice::Text)) return;
-    const QString time = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
-    QJsonObject o{{QStringLiteral("time"), time},
-                  {QStringLiteral("doc"), doc}, {QStringLiteral("src"), src}, {QStringLiteral("dst"), dst},
-                  {QStringLiteral("lines"), QJsonArray::fromStringList(lines)}};
-    if (!ink.isEmpty()) o.insert(QStringLiteral("ink"), ink);
-    f.write(QJsonDocument(o).toJson(QJsonDocument::Compact) + '\n');
-    g_dstToTime[dst] = time;
-    g_dstDone[dst] = false;
-}
+// Saved conversions (conversions.h): the converted pages are copied into hwr-db/<lang>/Conversions and recorded in
+// conversions.jsonl. pages = 0-based indices of the pages to copy.
+void collectConversion(const QString &doc, const QList<int> &pages, const QString &src, const QString &dst,
+                       const QStringList &lines, const QString &ink, const QString &kind);
+QString saveInkImage(const QImage &img);
 
 // Toolbar state: is the open page a typed page made by Convert page, and is it marked corrected?
 void updateCurrentPage() {
@@ -503,11 +489,14 @@ void insertOnNextPage(QPointer<QQuickItem> dv, int fromPage, const QStringList &
             return;
         }
         timer->deleteLater();
-        if (QObject *d = dv->property("document").value<QObject *>())
-            logConversion(d->property("id").toString(), dv->property("_rmppHwrSrc").toString(),
-                          dv->property("currentPageId").toString(), lines, dv->property("_rmppHwrInk").toString());
+        const QString doc = dv->property("document").value<QObject *>() ? dv->property("document").value<QObject *>()->property("id").toString() : QString();
+        const QString src = dv->property("_rmppHwrSrc").toString(), dst = dv->property("currentPageId").toString();
+        const QString ink = dv->property("_rmppHwrInk").toString();
         QMetaObject::invokeMethod(dv, "enterTextMode", Q_ARG(QVariant, true), Q_ARG(QVariant, QVariant()));
-        QTimer::singleShot(400, dv, [lines] { typeText(lines); });
+        QTimer::singleShot(400, dv, [=] {
+            typeText(lines);
+            collectConversion(doc, {fromPage, fromPage + 1}, src, dst, lines, ink, QStringLiteral("page"));
+        });
     });
     timer->start(150);
 }
@@ -863,7 +852,7 @@ Rectangle {
                 visible: page.sub === "collect"
                 label: "Save conversions: " + (hwr.collect ? "On" : "Off")
                 description: hwr.collect
-                    ? "Each Convert to text keeps your handwriting and its text. Fix mistakes on the text page and the fixed text is used to train the model. Stays on this tablet."
+                    ? "Each conversion is copied to the notebook hwr-db/<language>/Conversions. Fix mistakes in the text there and tap Done correcting; the fixed text is used to train the model. Stays on this tablet until you download it."
                     : "Nothing is saved. Converting still works."
                 Layout.fillWidth: true
                 action: ArkControls.Toggle {
@@ -981,7 +970,7 @@ Rectangle {
                 visible: page.sub === "collect"
                 property bool confirm: false
                 label: "Saved conversions: " + (hwr.conversions || 0) + " (" + (hwr.correctedCount || 0) + " corrected)"
-                description: "Each one is a handwritten page and the typed page after it. Fix the typed page, then tap Done correcting (in the toolbar or here). Only corrected ones are used for training; later edits are picked up too. Deleting keeps the notebook pages."
+                description: "Each one is a page in hwr-db/<language>/Conversions. Fix its text, then tap Done correcting (in the toolbar or here). Only corrected ones are used for training; later edits are picked up too. Deleting keeps the notebook pages."
                 Layout.fillWidth: true
                 action: ArkControls.Button {
                     visible: (hwr.conversions || 0) > 0
@@ -1067,6 +1056,36 @@ QObject *createInline(QQmlEngine *eng, QQmlContext *ctx, const char *qml, const 
 #include "ink.h"
 #include "practice.h"
 #include "practicenb.h"
+#include "conversions.h"
+
+// Helpers that need xochitl's QML engine but no screen of their own (practice import, conversion copies). The module
+// xofm.libs.library is registered a few seconds after start: tried on every timer tick until both are created.
+QPointer<QObject> g_practiceHelper, g_convHelper;
+int g_helperTries = 0;
+void tryInjectHelpers() {
+    if (g_practiceHelper && g_convHelper) return;
+    QQuickItem *any = findAnywhere([](QQuickItem *i) { return qmlContext(i) != nullptr; });
+    QQmlEngine *eng = any ? qmlEngine(any) : nullptr;
+    if (!eng) return;
+    static QQmlContext *ctx = nullptr;
+    if (!ctx) {
+        ctx = new QQmlContext(eng->rootContext(), qApp);
+        ctx->setContextProperty(QStringLiteral("hwr"), g_state);
+    }
+    const bool quiet = ++g_helperTries % 40 != 1;   // the errors once a minute at most
+    auto make = [&](const char *qml, const char *name) -> QObject * {
+        QQmlComponent comp(eng);
+        comp.setData(QByteArray(qml), QUrl(QStringLiteral("qrc:/rmpphwr/%1.qml").arg(QLatin1String(name))));
+        QObject *o = comp.create(ctx);
+        if (!o && !quiet)
+            for (const auto &e : comp.errors()) qWarning("[rmpp-hwr] %s: %s", name, qPrintable(e.toString()));
+        if (o) o->setParent(ctx);
+        return o;
+    };
+    if (!g_practiceHelper) g_practiceHelper = make(kPracticeQml, "PracticeImport");
+    if (!g_convHelper) g_convHelper = make(kConvQml, "ConvCopy");
+    if (g_practiceHelper && g_convHelper) qWarning("[rmpp-hwr] helpers ready (try %d)", g_helperTries);
+}
 
 // ---- Settings rail order shared by the rmpp add-ons ----
 // Every rmpp row carries an int property "rmppOrder" and goes after xochitl's Wi-Fi row, sorted by it:
@@ -1125,9 +1144,7 @@ void tryInjectSettings() {
         placeRailRow(col, row);
     }
     QObject *page = createInline(eng, ctx, kPageQml, "Page", settings);
-    QObject *importer = createInline(eng, ctx, kPracticeQml, "PracticeImport", settings);
-    qWarning("[rmpp-hwr] settings: row=%s page=%s importer=%s", row ? "ok" : "FAILED", page ? "ok" : "FAILED",
-             importer ? "ok" : "FAILED");
+    qWarning("[rmpp-hwr] settings: row=%s page=%s", row ? "ok" : "FAILED", page ? "ok" : "FAILED");
 }
 
 // "Done correcting": shown on a typed page made by Convert page; marks that conversion for training.
@@ -1384,7 +1401,8 @@ void hwrInit() {
     g_state->insert(QStringLiteral("lassoReplace"), false);
     g_state->insert(QStringLiteral("pageReplace"), false);
     g_state->insert(QStringLiteral("languageInUse"), QString());
-    g_state->insert(QStringLiteral("collect"), true);
+    g_state->insert(QStringLiteral("collect"), false);
+    g_state->insert(QStringLiteral("convCopy"), QString());
     g_state->insert(QStringLiteral("practiceImport"), QString());
     g_state->insert(QStringLiteral("practiceStatus"), QString());
     g_state->insert(QStringLiteral("practiceBusy"), false);
@@ -1411,6 +1429,9 @@ void hwrInit() {
                         cmd.section(QLatin1Char(':'), 3, 3).split(QLatin1Char(','), Qt::SkipEmptyParts),
                         cmd.section(QLatin1Char(':'), 4, 4).toInt());
         }
+        else if (cmd.startsWith(QLatin1String("conv:copied:")))   // from kConvQml: conv:copied:<ok>:<doc>:<before>
+            convCopied(cmd.section(QLatin1Char(':'), 2, 2) == QLatin1String("1"), cmd.section(QLatin1Char(':'), 3, 3),
+                       cmd.section(QLatin1Char(':'), 4, 4).toInt());
         else if (cmd.startsWith(QLatin1String("practice:importing:")))   // from kPracticeQml
             practiceImporting(cmd.section(QLatin1Char(':'), 2, 2) == QLatin1String("1"), cmd.section(QLatin1Char(':'), 3, 3));
         else if (cmd == QLatin1String("delall")) deleteConversions(QString());
@@ -1442,7 +1463,7 @@ void hwrInit() {
         }
     });
     auto *t = new QTimer(app);
-    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage();
+    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectHelpers(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage();
 #ifdef RMPP_HWR_DEV
         watchCmdFile();
 #endif

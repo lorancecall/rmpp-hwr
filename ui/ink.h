@@ -692,6 +692,11 @@ bool selectRect(QObject *sc, const QRect &r) {
     return true;
 }
 
+// The conversion being typed (for Save conversions): document, page index and id, the recognized ink.
+struct ConvCtx { QString doc, pageId; int page = -1; QImage img; bool pageReplace = false; };
+ConvCtx g_convCtx;
+bool g_pageConvert = false;   // set by convertPageInPlace for the conversion it starts
+
 // lines: each recognized line with its vertical centre (scene units), top to bottom.
 void putText(QPointer<QObject> scp, int layer, bool replace, const QList<QPair<double, QString>> &lines) {
     if (replace) QMetaObject::invokeMethod(scp, "deleteSelectedItems", Q_ARG(int, layer));
@@ -727,6 +732,11 @@ void putText(QPointer<QObject> scp, int layer, bool replace, const QList<QPair<d
             const bool in = scp->property("rootDocumentLength").toInt() > len;
             qWarning("[rmpp-hwr] text: %s (%s)", qPrintable(text),
                      in ? "inserted" : "NOT inserted");
+            if (in && g_convCtx.page >= 0)
+                collectConversion(g_convCtx.doc, {g_convCtx.page}, g_convCtx.pageId, g_convCtx.pageId, texts,
+                                  saveInkImage(g_convCtx.img),
+                                  g_convCtx.pageReplace ? QStringLiteral("page-replace") : replace ? QStringLiteral("lasso-replace") : QStringLiteral("lasso"));
+            g_convCtx = ConvCtx();
             setStatus(in ? QString() : QStringLiteral("the text could not be inserted (undo brings the handwriting back)"), false);
         });
     });
@@ -769,7 +779,9 @@ void convertPageInPlace() {
             QTimer::singleShot(500, scp, [scp] {
                 if (!scp) return;
                 if (scp->property("selectionItemCount").toInt() <= 0) { setStatus(QStringLiteral("no handwriting on this page"), false); return; }
+                g_pageConvert = true;
                 convertSelectionToInk(true, false, true);
+                g_pageConvert = false;
             });
         });
     });
@@ -802,6 +814,7 @@ void convertSelectionToInk(bool replace, bool editOnly = false, bool toText = fa
     }
     const QImage img = selectionImage();
     if (img.isNull()) { setStatus(QStringLiteral("no selection image"), false); return; }
+    if (toText) g_convCtx = ConvCtx{doc->property("id").toString(), pageId, dv->property("currentPage").toInt(), img, g_pageConvert};
     setStatus(QStringLiteral("Converting…"), true);
     showInkBusy(dv);
     QPointer<QObject> scp(sc), php(ph);
