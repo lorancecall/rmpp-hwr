@@ -623,8 +623,10 @@ def cmd_contribute(a):
             dst.write_text(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8", newline="\n")
             n += 1
     git("add", "data")
+    # Anonymous author on purpose. The address must not belong to anyone: GitHub credits a commit to whichever
+    # account owns its email (contributor@users.noreply.github.com is a real user). .invalid is reserved (RFC 2606).
     run(["git", "-C", str(clone), "-c", "user.name=rmpp-hwr contributor",
-         "-c", "user.email=contributor@users.noreply.github.com", "commit", "-q", "-m",
+         "-c", "user.email=contributor@rmpp-hwr-db.invalid", "commit", "-q", "-m",
          f"Add {n} page(s) from writer {wid[:8]}"])
     if a.dry_run:
         print(f"dry run: {n} page(s) committed on {branch} in {clone}; nothing pushed"); return
