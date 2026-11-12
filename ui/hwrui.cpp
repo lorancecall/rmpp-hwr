@@ -1083,7 +1083,9 @@ bool uiReady() {
     static int clearTicks = 0;
     if (ready) return true;
     if (passcodeScreenUp()) { clearTicks = 0; return false; }
-    ++clearTicks;
+    // the passcode screen appears a few seconds after xochitl starts: wait 9 s without it before touching the QML
+    // engine at all (a QML compile while it is first drawn is the suspect for its ghosting)
+    if (++clearTicks < 6) return false;
     tryInjectHelpers();
     if ((g_practiceHelper && g_convHelper) || clearTicks > 40) {
         ready = true;
@@ -1423,6 +1425,10 @@ void watchDoubleTap() {
 }
 
 void hwrInit() {
+#ifdef RMPP_HWR_INERT   // bisect build: loaded, does nothing
+    qWarning("[rmpp-hwr] loaded (inert test build)");
+    return;
+#endif
     auto *app = QCoreApplication::instance();
     g_state = new QQmlPropertyMap(app);
     g_state->insert(QStringLiteral("busy"), false);
