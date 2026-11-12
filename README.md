@@ -1,7 +1,13 @@
 # rmpp-hwr
 
-Handwriting recognition (Korean, English, digits) for the reMarkable Paper Pro, running on the tablet's CPU,
-plus the tools to collect your own handwriting and train a personal model.
+**Open handwriting recognition for the reMarkable Paper Pro, running on the tablet itself**: no cloud, no account,
+your notes never leave the device. Select handwriting with the lasso and turn it into clean text or tidy pen
+strokes, recognize a whole page, and train a model on your own handwriting.
+
+It starts with Korean, English and digits, and grows with the reMarkable community: the open dataset
+[rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db) collects handwriting in many languages from people who
+write on the tablet, `hwr contribute` shares your practice pages to it (anonymized, CC BY 4.0), and the public
+models are trained on it regularly. Every language that gathers writers there can be recognized here next.
 
 On the tablet:
 
@@ -40,8 +46,9 @@ On the tablet:
 - [references/README.md](references/README.md): what to try next and why.
 - [references/convert-to-ink.md](references/convert-to-ink.md): how Convert to ink works inside xochitl (findings,
   internals used, limits).
-- Open dataset: [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db) (Korean guide:
-  https://lorancecall.github.io/rmpp-hwr-db/). `hwr contribute` shares structured practice pages, anonymized.
+- Open dataset: [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db), the community's handwriting in many
+  languages (how to take part, in every supported language: https://lorancecall.github.io/rmpp-hwr-db/).
+  `hwr contribute` shares structured practice pages, anonymized; your language is missing? Ask for it there.
 
 ## Install
 
