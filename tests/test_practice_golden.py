@@ -4,6 +4,9 @@ output can be checked against tests/golden/practice-<lang>-seed7.json too.
 
   python tests/test_practice_golden.py           check (exit 1 on a difference); also runs under pytest
   python tests/test_practice_golden.py --update  rewrite the golden files after an intended layout change
+  python tests/test_practice_golden.py --tablet ko.json en.json
+                                                 check the tablet's sidecars (ui/test/practice_test.cpp, seed 7,
+                                                 8 pages, tests/golden/texts) against the golden files
 """
 import json
 import sys
@@ -41,7 +44,22 @@ def test_practice_layout_matches_golden():
     assert check() == []
 
 
+def check_tablet(files):
+    bad = []
+    for f in map(Path, files):
+        got = json.loads(f.read_text(encoding="utf-8"))
+        lang = got["languages"][0]
+        want = json.loads((HERE / "golden" / f"practice-{lang}-seed{SEED}.json").read_text(encoding="utf-8"))
+        if got != want:
+            bad.append(f.name)
+    return bad
+
+
 if __name__ == "__main__":
+    if "--tablet" in sys.argv:
+        bad = check_tablet(sys.argv[sys.argv.index("--tablet") + 1:])
+        print("differs from golden: " + ", ".join(bad) if bad else "tablet layout matches the golden files")
+        sys.exit(1 if bad else 0)
     bad = check("--update" in sys.argv)
     print("differs from golden: " + ", ".join(bad) if bad else "practice layout matches the golden files")
     sys.exit(1 if bad else 0)

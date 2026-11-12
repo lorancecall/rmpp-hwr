@@ -5,7 +5,10 @@
 #include <dlfcn.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <memory>
+#include <vector>
 #include <functional>
 #include <thread>
 
@@ -36,6 +39,7 @@
 #include <QtQml/QQmlEngine>
 #include <QtQml/QQmlPropertyMap>
 #include <QtGui/QPainter>
+#include <QtGui/QPdfWriter>
 #include <QtQuick/QQuickImageProvider>
 #include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickWindow>
@@ -595,8 +599,30 @@ Rectangle {
     id: page
     readonly property int hwrPage: 1001
     readonly property bool rmpp: hwr.converter === "rmpp"
-    // "" = main screen, "lang" = languages, "lang:<code>" = models of one language, "convert", "collect"
+    // "" = main screen, "lang" = languages, "lang:<code>" = models of one language, "convert", "collect",
+    // "practice-new" = New practice notebook
     property string sub: ""
+    property string newLang: ""
+    property var newTopics: []
+    property int newPages: 8
+    readonly property var practiceLangs: { try { return JSON.parse(hwr.practiceLangs || "[]"); } catch (e) { return []; } }
+    readonly property var practiceList: { try { return JSON.parse(hwr.practiceList || "[]"); } catch (e) { return []; } }
+    readonly property var newLangEntry: {
+        for (const l of practiceLangs) if (l.code === newLang) return l;
+        return practiceLangs.length ? practiceLangs[0] : null;
+    }
+    function startNew() {
+        const l = newLangEntry;
+        newLang = l ? l.code : "";
+        newTopics = l ? l.topics.map(t => t.id) : [];
+        go("practice-new");
+    }
+    function toggleTopic(id) {
+        const t = newTopics.slice();
+        const i = t.indexOf(id);
+        if (i >= 0) { if (t.length > 1) t.splice(i, 1); } else t.push(id);
+        newTopics = t;
+    }
     property string openTime: ""
     property string confirmDelete: ""
     readonly property var languages: { try { return JSON.parse(hwr.languageList || "[]"); } catch (e) { return []; } }
@@ -642,9 +668,9 @@ Rectangle {
 
             ArkControls.Button {
                 visible: page.sub !== ""
-                text: page.sub.startsWith("lang:") ? "‹  Language" : "‹  Handwriting"
+                text: page.sub.startsWith("lang:") ? "‹  Language" : page.sub === "practice-new" ? "‹  Collect training data" : "‹  Handwriting"
                 type: ArkTokens.Button.secondary
-                onClicked: page.go(page.sub.startsWith("lang:") ? "lang" : "")
+                onClicked: page.go(page.sub.startsWith("lang:") ? "lang" : page.sub === "practice-new" ? "collect" : "")
             }
             ArkControls.Title {
                 type: ArkControls.Title.Large
@@ -652,6 +678,7 @@ Rectangle {
                     : page.sub === "lang" ? "Language"
                     : page.sub === "convert" ? "Convert"
                     : page.sub === "collect" ? "Collect training data"
+                    : page.sub === "practice-new" ? "New practice notebook"
                     : (page.langEntry ? page.langEntry.name : "Language")
                 Layout.fillWidth: true
             }
@@ -851,8 +878,103 @@ Rectangle {
             ArkControls.Panel {
                 visible: page.sub === "collect"
                 label: "Practice notebooks"
-                description: "Notebooks named rmpp-practice have sentences to copy by hand, the fastest way to teach the model your writing. New ones are added from the computer."
+                description: "Sentences to copy by hand, the fastest way to teach the model your writing. New notebooks go to the folder hwr-db, by language."
                 Layout.fillWidth: true
+                action: ArkControls.Button {
+                    text: "New"
+                    type: ArkTokens.Button.secondary
+                    enabled: page.practiceLangs.length > 0
+                    onClicked: page.startNew()
+                }
+            }
+            ArkControls.Panel {
+                visible: (page.sub === "collect" || page.sub === "practice-new") && !!hwr.practiceStatus
+                label: hwr.practiceStatus || ""
+                Layout.fillWidth: true
+            }
+            Repeater {
+                model: page.sub === "collect" ? page.practiceList : []
+                delegate: ArkControls.Panel {
+                    required property var modelData
+                    label: modelData.name
+                    description: modelData.lang + "  ·  " + (modelData.written >= modelData.pages
+                        ? "Done: all " + modelData.pages + " pages written"
+                        : modelData.written + " of " + modelData.pages + " pages written")
+                    Layout.fillWidth: true
+                    Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                }
+            }
+
+            // ================= New practice notebook =================
+            ArkControls.Panel {
+                visible: page.sub === "practice-new"
+                label: "Language"
+                description: "Each notebook practises one language, with English and digits."
+                Layout.fillWidth: true
+            }
+            Flow {
+                visible: page.sub === "practice-new"
+                spacing: ArkControls.Values.spacing.medium
+                Layout.fillWidth: true
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                Repeater {
+                    model: page.sub === "practice-new" ? page.practiceLangs : []
+                    delegate: ArkControls.Button {
+                        required property var modelData
+                        text: modelData.name
+                        type: page.newLangEntry && page.newLangEntry.code === modelData.code ? ArkTokens.Button.primary : ArkTokens.Button.secondary
+                        onClicked: { page.newLang = modelData.code; page.newTopics = modelData.topics.map(t => t.id); }
+                    }
+                }
+            }
+            ArkControls.Panel {
+                visible: page.sub === "practice-new"
+                label: "Topics"
+                description: "Where the sentences come from. At least one."
+                Layout.fillWidth: true
+            }
+            Flow {
+                visible: page.sub === "practice-new"
+                spacing: ArkControls.Values.spacing.medium
+                Layout.fillWidth: true
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                Repeater {
+                    model: page.sub === "practice-new" && page.newLangEntry ? page.newLangEntry.topics : []
+                    delegate: ArkControls.Button {
+                        required property var modelData
+                        text: modelData.name
+                        type: page.newTopics.indexOf(modelData.id) >= 0 ? ArkTokens.Button.primary : ArkTokens.Button.secondary
+                        onClicked: page.toggleTopic(modelData.id)
+                    }
+                }
+            }
+            ArkControls.Panel {
+                visible: page.sub === "practice-new"
+                label: "Pages"
+                description: "About 10 minutes of writing per page."
+                Layout.fillWidth: true
+            }
+            RowLayout {
+                visible: page.sub === "practice-new"
+                spacing: ArkControls.Values.spacing.medium
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                Repeater {
+                    model: page.sub === "practice-new" ? [4, 8, 16] : []
+                    delegate: ArkControls.Button {
+                        required property var modelData
+                        text: String(modelData)
+                        type: page.newPages === modelData ? ArkTokens.Button.primary : ArkTokens.Button.secondary
+                        onClicked: page.newPages = modelData
+                    }
+                }
+            }
+            ArkControls.Button {
+                visible: page.sub === "practice-new"
+                text: hwr.practiceBusy ? "Adding…" : "Create notebook"
+                type: ArkTokens.Button.primary
+                enabled: !hwr.practiceBusy && !!page.newLangEntry && page.newTopics.length > 0
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                onClicked: page.send("practice:new:" + page.newLangEntry.code + ":" + page.newTopics.join(",") + ":" + page.newPages)
             }
             ArkControls.Panel {
                 id: savedPanel
@@ -943,6 +1065,8 @@ QObject *createInline(QQmlEngine *eng, QQmlContext *ctx, const char *qml, const 
 }
 
 #include "ink.h"
+#include "practice.h"
+#include "practicenb.h"
 
 // ---- Settings rail order shared by the rmpp add-ons ----
 // Every rmpp row carries an int property "rmppOrder" and goes after xochitl's Wi-Fi row, sorted by it:
@@ -1001,7 +1125,9 @@ void tryInjectSettings() {
         placeRailRow(col, row);
     }
     QObject *page = createInline(eng, ctx, kPageQml, "Page", settings);
-    qWarning("[rmpp-hwr] settings: row=%s page=%s", row ? "ok" : "FAILED", page ? "ok" : "FAILED");
+    QObject *importer = createInline(eng, ctx, kPracticeQml, "PracticeImport", settings);
+    qWarning("[rmpp-hwr] settings: row=%s page=%s importer=%s", row ? "ok" : "FAILED", page ? "ok" : "FAILED",
+             importer ? "ok" : "FAILED");
 }
 
 // "Done correcting": shown on a typed page made by Convert page; marks that conversion for training.
@@ -1259,6 +1385,11 @@ void hwrInit() {
     g_state->insert(QStringLiteral("pageReplace"), false);
     g_state->insert(QStringLiteral("languageInUse"), QString());
     g_state->insert(QStringLiteral("collect"), true);
+    g_state->insert(QStringLiteral("practiceImport"), QString());
+    g_state->insert(QStringLiteral("practiceStatus"), QString());
+    g_state->insert(QStringLiteral("practiceBusy"), false);
+    g_state->insert(QStringLiteral("practiceLangs"), QStringLiteral("[]"));
+    g_state->insert(QStringLiteral("practiceList"), QStringLiteral("[]"));
     g_state->insert(QStringLiteral("inkText"), QString());
     g_state->insert(QStringLiteral("inkWeight"), 1);
     g_state->insert(QStringLiteral("inkSize"), 100);
@@ -1274,7 +1405,14 @@ void hwrInit() {
         else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
         else if (cmd == QLatin1String("inkok")) finishInkEdit(true);
         else if (cmd == QLatin1String("inkcancel")) finishInkEdit(false);
-        else if (cmd == QLatin1String("refresh")) refreshInfo();
+        else if (cmd == QLatin1String("refresh")) { refreshInfo(); refreshPracticeLangs(); refreshPracticeList(); }
+        else if (cmd.startsWith(QLatin1String("practice:new:"))) {   // practice:new:<lang>:<topic,topic>:<pages>
+            newPractice(cmd.section(QLatin1Char(':'), 2, 2),
+                        cmd.section(QLatin1Char(':'), 3, 3).split(QLatin1Char(','), Qt::SkipEmptyParts),
+                        cmd.section(QLatin1Char(':'), 4, 4).toInt());
+        }
+        else if (cmd.startsWith(QLatin1String("practice:importing:")))   // from kPracticeQml
+            practiceImporting(cmd.section(QLatin1Char(':'), 2, 2) == QLatin1String("1"), cmd.section(QLatin1Char(':'), 3, 3));
         else if (cmd == QLatin1String("delall")) deleteConversions(QString());
         else if (cmd.startsWith(QLatin1String("del:"))) deleteConversions(cmd.mid(4));
         else if (cmd.startsWith(QLatin1String("show:"))) showRecord(cmd.mid(5));
