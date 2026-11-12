@@ -1,5 +1,9 @@
 # rmpp-hwr
 
+![Lasso handwriting, tap Convert: typed text on its line, or a text object you can move and edit](docs/rmpp-hwr.gif)
+
+*Lasso your handwriting and tap Convert: typed text on the line where you wrote it, or a text object you can move and edit (v0.3).*
+
 **Open handwriting recognition for the reMarkable Paper Pro, running on the tablet itself**: no cloud, no account,
 your notes never leave the device. Select handwriting with the lasso and turn it into clean text or tidy pen
 strokes, recognize a whole page, and train a model on your own handwriting.
