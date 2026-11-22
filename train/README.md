@@ -52,7 +52,7 @@ hwr setup                                  # once: PaddleOCR + packages (inside 
 hwr job gen_base.sh --res cpu-big          # once: synthetic train/val lines
 hwr train [NAME]                           # upload personal data -> gen_personal -> train -> export + judge
 hwr status                                 # queue / background state, newest log, exports, best
-hwr fetch NAME                             # export/NAME/rec.onnx -> hwr-train/out/NAME, eval on the tablet pipeline
+hwr fetch NAME                             # export/NAME/rec.onnx -> hwr-train/out/NAME, eval through the Paper Pro pipeline
 hwr job probe.sh --res gpu-short           # training-mode sanity check of the base weights
 hwr job eval.sh export/NAME/rec.onnx --res cpu
 ```
@@ -66,7 +66,7 @@ Fine-tuning on Korean handwriting alone made English worse (synthetic English CE
 runs). Two measures are built in:
 
 1. **Real English handwriting: IAM-OnDB.** The IAM On-Line Handwriting Database has pen strokes of ~200
-   writers, so `gen.py iamon` renders them exactly like tablet input. Its terms allow **non-commercial research
+   writers, so `gen.py iamon` renders them exactly like Paper Pro input. Its terms allow **non-commercial research
    use only**, ask for registration and a citation, and the data itself must not be redistributed. Every user
    registers and downloads it themselves (fki.tic.heia-fr.ch, "IAM On-Line Handwriting Database"):
    `lineStrokes-all.tar.gz` and `ascii-all.tar.gz`, unpacked into one folder with `lineStrokes/` and `ascii/`. Then

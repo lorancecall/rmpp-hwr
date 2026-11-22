@@ -4,12 +4,13 @@
 
 *Lasso your handwriting and tap Convert: typed text on the line where you wrote it, or a text object you can move and edit (v0.3).*
 
-**Open handwriting recognition for the reMarkable Paper Pro, running on the tablet itself**: no cloud, no account,
+**Open handwriting recognition for the reMarkable Paper Pro, running on the device itself**: no cloud, no account,
 your notes never leave the device. Select handwriting with the lasso and turn it into clean text or tidy pen
 strokes, recognize a whole page, and train a model on your own handwriting. Runs without xovi and keeps working
 after a reboot.
 
-Tested on reMarkable Paper Pro, OS 3.29.1.
+Made for and tested on the reMarkable Paper Pro with OS 3.29 only; other reMarkable models are not supported
+and their compatibility is not guaranteed. Following newer OS versions happens when I have time, and may not happen.
 
 > Part of the **rmpp add-ons**, built on [rmpp-packages](https://github.com/lorancecall/rmpp-packages): it is
 > installed by rmpp setup, loaded into xochitl at every boot by rmpp-preload (no xovi), and kept up to date with
@@ -21,7 +22,7 @@ Tested on reMarkable Paper Pro, OS 3.29.1.
 > only gets better with the handwriting people share. rmpp-hwr-db is an open dataset of real pen strokes written on
 > the Paper Pro; it is just starting, so the first writers shape it the most.
 > [**Join as a writer**](https://lorancecall.github.io/rmpp-hwr-db/) · [see the dataset](https://github.com/lorancecall/rmpp-hwr-db)
-> · How: write practice pages on the tablet (Settings > Handwriting > Collect training data) and share them with
+> · How: write practice pages on the Paper Pro (Settings > Handwriting > Collect training data) and share them with
 > `hwr contribute`, anonymized (CC BY 4.0). Your language is missing? Ask for it there.
 
 ## Install
@@ -46,7 +47,7 @@ Details: [docs/usage.md](docs/usage.md).
 
 ## How it works
 
-A Rust recognizer (PaddleOCR PP-OCRv5 models, ONNX) runs on the tablet; a small add-on in xochitl adds the buttons
+A Rust recognizer (PaddleOCR PP-OCRv5 models, ONNX) runs on the Paper Pro; a small add-on in xochitl adds the buttons
 and settings, and hands text objects to [rmpp-textobj](https://github.com/lorancecall/rmpp-textobj). Models are
 fine-tuned on rmpp-hwr-db and your own practice pages. The code, training and references:
 [docs/develop.md](docs/develop.md).
@@ -55,7 +56,7 @@ fine-tuned on rmpp-hwr-db and your own practice pages. The code, training and re
 
 [docs/install.md#build-and-install-by-hand](docs/install.md#build-and-install-by-hand).
 
-Privacy: nothing leaves the tablet when you convert; `hwr contribute` sends random writer ids and pen strokes only.
+Privacy: nothing leaves the Paper Pro when you convert; `hwr contribute` sends random writer ids and pen strokes only.
 
 ## License
 

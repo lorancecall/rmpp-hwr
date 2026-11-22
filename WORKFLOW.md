@@ -1,10 +1,10 @@
 # Teaching the recognizer your handwriting
 
-How handwriting goes from the tablet to a personal model and back. Every step on the PC is one `hwr`
+How handwriting goes from the Paper Pro to a personal model and back. Every step on the PC is one `hwr`
 command (`rmpp-hwr/tools/hwr`, or `hwr.cmd` on Windows).
 
 ```
- tablet                                  PC                                   training GPU (local or Slurm)
+ Paper Pro                               PC                                   training GPU (local or Slurm)
  ─────────────────────────────           ───────────────────────────          ─────────────────────────
  1 practice notebook  ◄── hwr practice
    write the sentences
@@ -21,7 +21,7 @@ command (`rmpp-hwr/tools/hwr`, or `hwr.cmd` on Windows).
 
 ## Setup (once)
 
-- The tablet is reachable as `ssh rmpp` (key `~/.ssh/id_ed25519_rmpp`). A VPN on the PC can block the
+- The Paper Pro is reachable as `ssh rmpp` (key `~/.ssh/id_ed25519_rmpp`). A VPN on the PC can block the
   local network: turn it off or allow LAN.
 - Training: copy `rmpp-hwr/.env.example` to `rmpp-hwr/.env` and choose `HWR_BACKEND=local` (this PC's GPU)
   or `slurm` (a cluster over ssh); see `train/README.md`. Then `hwr setup` once.
@@ -39,7 +39,7 @@ hwr practice --v2 --lang en          # English + digits
 hwr tidy                             # move older practice notebooks into "hwr-db/<lang>"
 ```
 
-- The notebook appears in the tablet folder **hwr-db/<lang>** (made on first use). Write each sentence inside its
+- The notebook appears in the Paper Pro folder **hwr-db/<lang>** (made on first use). Write each sentence inside its
   box, one line per box.
 - The sentence is the label, so nothing needs correcting. This is the fastest way to collect data.
 - Text files: one line per box (long lines are wrapped at spaces), a blank line between passages.
@@ -54,7 +54,7 @@ hwr tidy                             # move older practice notebooks into "hwr-d
 ## 2. Convert pages you write anyway
 
 1. On a page with handwriting: toolbar, Convert menu, **Convert page**. The text is typed on a new page
-   right after it. A copy of the handwriting is kept on the tablet at that moment, so editing or deleting
+   right after it. A copy of the handwriting is kept on the Paper Pro at that moment, so editing or deleting
    the handwritten page later does not change the sample.
 2. Fix the mistakes on the typed page. Deleting a junk line (a stray mark read as "/") is fine.
 3. Convert menu, **Done correcting**. Only conversions marked like this are used for training. You can
@@ -68,23 +68,23 @@ stops recording; Convert page keeps working.
 ## 3. Collect on the PC
 
 ```
-hwr pull           # practice notebooks + corrected conversions -> hwr-data/collected (tablet unchanged)
-hwr pull --delete  # same, then clean up the tablet (below)
+hwr pull           # practice notebooks + corrected conversions -> hwr-data/collected (Paper Pro unchanged)
+hwr pull --delete  # same, then clean up the Paper Pro (below)
 ```
 
 - Output: `hwr-data/collected/dataset.tsv` (`image path <TAB> text`) and `samples/`. For each conversion:
   `original.rm/png` (handwriting), `converted.txt` (recognized), `corrected.txt` (your text),
   `lines/NN.png`, `pairs.tsv`.
-- Nothing on the tablet changes unless `--delete`: then corrected conversions are removed from the tablet and
-  fully written practice notebooks go to the tablet's trash (one xochitl restart); the PC copies stay.
-- Practice notebook layouts (sidecars) come from the PC and from the tablet's registry
+- Nothing on the Paper Pro changes unless `--delete`: then corrected conversions are removed from the Paper Pro and
+  fully written practice notebooks go to the Paper Pro's trash (one xochitl restart); the PC copies stay.
+- Practice notebook layouts (sidecars) come from the PC and from the Paper Pro's registry
   (`/home/root/.local/share/rmpp-hwr/practice/<doc_id>.json`, written by `hwr practice` and by notebooks made
-  on the tablet).
-- Waiting (not corrected) ones stay on the tablet. A record deleted on the tablet before it was pulled is
+  on the Paper Pro).
+- Waiting (not corrected) ones stay on the Paper Pro. A record deleted on the Paper Pro before it was pulled is
   removed on the PC too.
 - If the handwriting has a different number of lines from the typed page, lines are matched by content;
   unmatched lines are left out. If even that is impossible, the sample says `needs_review.txt`.
-- If the tablet falls asleep during a pull, earlier results are kept; wake it and run `hwr pull` again.
+- If the Paper Pro falls asleep during a pull, earlier results are kept; wake it and run `hwr pull` again.
 
 ## 4. Train
 
@@ -102,7 +102,7 @@ lines so nothing is forgotten), fine-tune from the current best model (or the ba
 
 ```
 hwr fetch my-run        # download and score it
-hwr eval               # score the model that is on the tablet now
+hwr eval               # score the model that is on the Paper Pro now
 hwr models             # all downloaded models and their scores
 ```
 
@@ -112,20 +112,20 @@ used for training, so models are compared fairly. Lower is better. The base mode
 ## 6. Install it
 
 ```
-hwr deploy my-run      # install training run my-run on the tablet (the old one is kept)
+hwr deploy my-run      # install training run my-run on the Paper Pro (the old one is kept)
 hwr rollback           # go back to the previous model
 ```
 
 Each deployed model gets the next version name, `rmpp-hwr-korean-v0.1`, `-v0.2`, ...; the training run it came from
 is recorded in `hwr-train/out/releases.json` (`hwr models` lists both). Settings > Handwriting > Model then shows
 "rmpp-hwr-korean-v0.3 (error NN%)". The base model is `rmpp-hwr-korean-base`. Only deploy a model that scores lower
-than the one on the tablet.
+than the one on the Paper Pro.
 
 ## Status (2026-11-10)
 
 - Collected: 100 lines (rmpp-practice-1 and -2, one corrected page). `rmpp-practice-100` is on the
-  tablet, not written yet.
+  Paper Pro, not written yet.
 - The first fine-tuned models were worse on your handwriting than the base model (0.32 and up vs 0.257),
-  so the tablet still runs the base model. The training setup is being investigated (training-mode
+  so the Paper Pro still runs the base model. The training setup is being investigated (training-mode
   forward pass, mixed precision, BatchNorm, English forgetting).
 - `fetch`, `deploy`, `rollback` and `train` have not been run end to end yet.

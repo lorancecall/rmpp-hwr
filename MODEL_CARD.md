@@ -1,8 +1,8 @@
 # rmpp-hwr Korean recognition model
 
-The default Korean model in rmpp-hwr releases (`rec.onnx`, `dict.txt`, `model.txt`; on the tablet in
+The default Korean model in rmpp-hwr releases (`rec.onnx`, `dict.txt`, `model.txt`; on the Paper Pro in
 `/home/root/.local/share/rmpp-hwr/` and `models/<version>/`). Each release ships the latest model trained on the
-rmpp-hwr-db data; older versions are not kept on the tablet.
+rmpp-hwr-db data; older versions are not kept on the Paper Pro.
 
 | | |
 |---|---|

@@ -20,7 +20,7 @@ models are listed under Handwriting recognition. All packages and what needs wha
 ## Without rmpp setup
 
 Follow [manual-install.md](https://github.com/lorancecall/rmpp-packages/blob/main/docs/manual-install.md) (Vellum and
-the rmpp package repository), then on the tablet:
+the rmpp package repository), then on the Paper Pro:
 
 ```sh
 vellum add rmpp-hwr            # with rmpp-hwr-ko, rmpp-textobj, rmpp-lang, rmpp-preload
@@ -32,7 +32,7 @@ Older ways, for developers and old installs:
 - **`hwr install`** from a clone of this repository (your own models, development builds): see
   [Build and install by hand](#build-and-install-by-hand).
 - **Release files** (how rmpp setup installed rmpp-hwr up to 0.3): the GitHub releases carry the files and
-  `rmpp-install.sh`; copy all assets of a release into one folder on the tablet and run `sh rmpp-install.sh` there
+  `rmpp-install.sh`; copy all assets of a release into one folder on the Paper Pro and run `sh rmpp-install.sh` there
   as root. Installing the packages moves the files of such an install aside.
 
 ## Uninstall
@@ -60,11 +60,11 @@ packages installed (above, or rmpp setup). On the PC:
 ```sh
 git clone https://github.com/lorancecall/rmpp-hwr && cd rmpp-hwr
 uv venv ../.venv && uv pip install -p ../.venv -r collect/requirements.txt
-cp .env.example .env              # tablet address etc.; never committed
-tools/hwr install                 # UI add-on + recognizer + model onto the tablet
+cp .env.example .env              # Paper Pro address etc.; never committed
+tools/hwr install                 # UI add-on + recognizer + model onto the Paper Pro
 ```
 
-`hwr install` keeps a model that is already on the tablet (pass `--model DIR` to replace it); a model you trained
+`hwr install` keeps a model that is already on the Paper Pro (pass `--model DIR` to replace it); a model you trained
 yourself goes to `models/<name>/` and is listed in Settings > Handwriting.
 
 Building needs the Arm GNU aarch64 toolchain, Qt 6.10 headers/device libraries and onnxruntime for linux-aarch64 in
@@ -75,6 +75,6 @@ The package recipes (VELBUILD) are in
 [rmpp-packages/packages](https://github.com/lorancecall/rmpp-packages/tree/main/packages); the next `vellum upgrade`
 or reinstall puts the released files back.
 
-On the tablet, never run `systemctl stop xochitl` (it powers the tablet off); run `systemctl reset-failed xochitl`
+On the Paper Pro, never run `systemctl stop xochitl` (it powers the Paper Pro off); run `systemctl reset-failed xochitl`
 before `systemctl restart xochitl` (repeated restarts otherwise hit systemd's limit). The root file system is
 read-only: `mount -o remount,rw /` before changing files under `/usr/lib/rmpp`, `mount -o remount,ro /` after.
