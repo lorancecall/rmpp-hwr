@@ -32,8 +32,7 @@ has **rmpp setup**, the installer for all rmpp add-ons.
 - In rmpp setup, tick **Handwriting recognition (beta)** (rmpp-hwr; not selected by default; the Korean model and
   rmpp-textobj come with it). The other languages' models are listed under it.
 - After a reMarkable OS update: **Restore** in rmpp setup.
-- Other ways (Vellum on the command line, the release files, `hwr install`) and removal:
-  [docs/install.md](docs/install.md).
+- Other ways and removal: [docs/install.md](docs/install.md).
 
 ## Use
 
