@@ -22,8 +22,10 @@ rmpp-hwr-db data; older versions are not kept on the tablet.
    1.1); rendering text for training is permitted by the OFL, no font is redistributed.
 4. **korean-handwriting-strokes** by jbaudanza (Hugging Face), CC BY-SA 4.0: Korean pen recordings rendered as
    lines. Attribution required; the model is released under CC BY-SA 4.0 so that its share-alike terms are met.
-5. **Text corpora** for the synthetic lines (`en.parquet`, `ko.parquet`, `sentences.parquet`): sentences, origin
-   to be confirmed before each release (if Wikipedia: CC BY-SA, compatible with the license above).
+5. **Text corpora** for the synthetic lines: sentences from Wikipedia, via the Hugging Face dataset
+   `wikimedia/wikipedia` (downloaded 2026-11-10; snapshot date not recorded): Korean Wikipedia (ko) and Simple
+   English Wikipedia (en), by Wikipedia contributors, CC BY-SA 4.0. The sentences are only rendered as training
+   images; no Wikipedia text ships in the release.
 
 Not used: IAM-OnDB (its terms do not allow redistributing models trained on it).
 
