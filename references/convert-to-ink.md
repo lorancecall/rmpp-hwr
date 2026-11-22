@@ -1,3 +1,6 @@
+> Text objects moved to [rmpp-textobj](https://github.com/lorancecall/rmpp-textobj) (rmpp-hwr 0.4): the notes below
+> describe how they began here; rmpp-hwr now only recognizes and hands the text over.
+
 # Convert to ink (prototype design notes)
 
 Last updated: 2026-11-10

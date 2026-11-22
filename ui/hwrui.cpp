@@ -96,7 +96,6 @@ void loadSettings() {
     g_state->insert(QStringLiteral("hwrModel"), model == QLatin1String("builtin") ? QStringLiteral("deployed") : model);
     // settings from before v0.4 have no name: the deployed model of then is the Korean one (the package's name)
     g_state->insert(QStringLiteral("hwrModelName"), s.value(QStringLiteral("modelName")).toString());
-    g_state->insert(QStringLiteral("addTextEm"), s.value(QStringLiteral("addTextEm"), 0.0).toDouble());
 }
 
 void saveSetting(const QString &key, const QVariant &v) {
@@ -743,7 +742,7 @@ Rectangle {
                     { key: "lang", label: "Language",
                       text: hwr.languageInUse ? hwr.languageInUse + ": " + page.modelInUseName() : "No model installed" },
                     { key: "convert", label: "Convert",
-                      text: "Page: " + (hwr.pageReplace ? "into the page" : "on a new page") + ".  Lasso: " + (hwr.textObject ? "text object" : "typed text") + "." },
+                      text: "Page: " + (hwr.pageReplace ? "into the page" : "on a new page") + ".  Lasso: " + (hwr.textObject && hwr.textObjAvailable ? "text object" : "typed text") + "." },
                     { key: "collect", label: "Collect training data",
                       text: "Save conversions: " + (hwr.collect ? "on" : "off") + ", " + (hwr.conversions || 0) + " saved." }
                 ] : []
@@ -851,7 +850,7 @@ Rectangle {
             ArkControls.Panel {
                 visible: page.sub === "convert"
                 label: "Lasso convert"
-                description: hwr.textObject
+                description: hwr.textObject && hwr.textObjAvailable
                     ? "The convert button under a lasso selection writes the recognized text as a text object: ink in the language's font that you can move, resize and erase. Double tap it to edit its text, weight and size."
                     : "The convert button under a lasso selection recognizes the handwriting and types the text into the page's text, on the line at the height of the handwriting."
                 Layout.fillWidth: true
@@ -859,11 +858,13 @@ Rectangle {
             ArkControls.Panel {
                 visible: page.sub === "convert"
                 label: "Text object mode"
-                description: "Write the result as an editable text object instead of typed text."
+                description: hwr.textObjAvailable ? "Write the result as an editable text object instead of typed text."
+                                                  : "Needs the rmpp-textobj add-on."
                 Layout.fillWidth: true
                 Layout.leftMargin: ArkControls.Values.margin.horizontal.large
                 action: ArkControls.Toggle {
-                    checked: !!hwr.textObject
+                    checked: !!hwr.textObject && !!hwr.textObjAvailable
+                    enabled: !!hwr.textObjAvailable
                     MouseArea {
                         anchors.fill: parent
                         anchors.margins: -20
@@ -875,9 +876,9 @@ Rectangle {
                 visible: page.sub === "convert"
                 label: "Replace the handwriting"
                 description: hwr.lassoReplace
-                    ? (hwr.textObject ? "The handwriting is removed and the text object takes its place (undo brings it back)."
+                    ? (hwr.textObject && hwr.textObjAvailable ? "The handwriting is removed and the text object takes its place (undo brings it back)."
                                       : "The handwriting is removed once the text is typed in (undo brings it back).")
-                    : (hwr.textObject ? "The handwriting stays; the text object is written below it."
+                    : (hwr.textObject && hwr.textObjAvailable ? "The handwriting stays; the text object is written below it."
                                       : "The handwriting stays and moves down, below the typed text.")
                 Layout.fillWidth: true
                 Layout.leftMargin: ArkControls.Values.margin.horizontal.large
@@ -1097,9 +1098,7 @@ QObject *createInline(QQmlEngine *eng, QQmlContext *ctx, const char *qml, const 
     return o;
 }
 
-#include "glyphs.h"
 #include "ink.h"
-#include "addtext.h"
 #include "practice.h"
 #include "practicenb.h"
 #include "conversions.h"
@@ -1374,9 +1373,9 @@ MouseArea {
     anchors.fill: parent
     z: 1000
     enabled: hwr.converter === "rmpp"
-    onClicked: hwr.command = (hwr.textObject ? "ink#" : "text#") + Date.now()
+    onClicked: hwr.command = (hwr.textObject && hwr.textObjAvailable ? "ink#" : "text#") + Date.now()
     // the text-object icon only while the tap is ours; the Binding restores xochitl's icon otherwise
-    Binding { target: btnRef; property: "iconSource"; value: inkIcon; when: hwr.converter === "rmpp" && !!hwr.textObject }
+    Binding { target: btnRef; property: "iconSource"; value: inkIcon; when: hwr.converter === "rmpp" && !!hwr.textObject && !!hwr.textObjAvailable }
 }
 )QML";
 
@@ -1460,21 +1459,10 @@ void watchSelection() {
     QMetaObject::connect(sc, sig, hook, QObject::staticMetaObject.methodCount(), Qt::DirectConnection, nullptr);
 }
 
-// Double tap on a lasso selection of converted ink opens the edit box: the selection handler's drag area emits
-// doubleClicked (pen and finger). Hooked once per area.
-void watchDoubleTap() {
-    QQuickItem *h = findAnywhere([](QQuickItem *i) { return classStarts(i, "SceneSelectionHandler"); });
-    if (!h) return;
-    for (QQuickItem *k : h->childItems()) {
-        if (!k->inherits("QQuickMouseArea") || k->property("_rmppHwrTap").toBool()) continue;
-        const int sig = k->metaObject()->indexOfSignal("doubleClicked(QQuickMouseEvent*)");
-        if (sig < 0) continue;
-        k->setProperty("_rmppHwrTap", true);
-        auto *hook = new SignalHook;
-        hook->setParent(k);
-        hook->fn = [] { QTimer::singleShot(0, qApp, [] { convertSelectionToInk(false, true); }); };
-        QMetaObject::connect(k, sig, hook, QObject::staticMetaObject.methodCount(), Qt::DirectConnection, nullptr);
-    }
+// rmpp-textobj is loaded: the lasso convert button can make text objects (Settings > Handwriting > Convert).
+void updateTextObjAvailable() {
+    const bool on = textObj().ok();
+    if (g_state->value(QStringLiteral("textObjAvailable")).toBool() != on) g_state->insert(QStringLiteral("textObjAvailable"), on);
 }
 
 void hwrInit() {
@@ -1501,28 +1489,17 @@ void hwrInit() {
     g_state->insert(QStringLiteral("practiceBusy"), false);
     g_state->insert(QStringLiteral("practiceLangs"), QStringLiteral("[]"));
     g_state->insert(QStringLiteral("practiceList"), QStringLiteral("[]"));
-    g_state->insert(QStringLiteral("inkText"), QString());
-    g_state->insert(QStringLiteral("inkWeight"), 1);
-    g_state->insert(QStringLiteral("inkSize"), 100);
-    g_state->insert(QStringLiteral("inkMissing"), QString());
-    g_state->insert(QStringLiteral("addTextEm"), 0.0);
+    g_state->insert(QStringLiteral("textObjAvailable"), false);   // rmpp-textobj is loaded (text objects)
     QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
-        if (key == QLatin1String("inkText")) { updateInkMissing(v.toString()); return; }
         if (key != QLatin1String("command")) return;
         const QString cmd = v.toString().section(QLatin1Char('#'), 0, 0);
-        if (cmd == QLatin1String("addtext")) startAddTextObject();
-        else if (cmd == QLatin1String("addtextcancel")) closeAddPlace();
-        else if (cmd.startsWith(QLatin1String("addtextat:")))
-            placeTextObject(cmd.section(QLatin1Char(':'), 1, 1).toDouble(), cmd.section(QLatin1Char(':'), 2, 2).toDouble());
-        else if (cmd == QLatin1String("page")) {
+        if (cmd == QLatin1String("page")) {
             if (g_state->value(QStringLiteral("pageReplace")).toBool()) convertPageInPlace();
             else convertCurrentPage();
         }
         else if (cmd == QLatin1String("ink")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool());
-        else if (cmd == QLatin1String("text")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool(), false, true);
+        else if (cmd == QLatin1String("text")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool(), true);
         else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
-        else if (cmd == QLatin1String("inkok")) finishInkEdit(true);
-        else if (cmd == QLatin1String("inkcancel")) finishInkEdit(false);
         else if (cmd == QLatin1String("refresh")) { refreshInfo(); refreshPracticeLangs(); refreshPracticeList(); }
         else if (cmd.startsWith(QLatin1String("practice:new:"))) {   // practice:new:<lang>:<topic,topic>:<pages>
             newPractice(cmd.section(QLatin1Char(':'), 2, 2),
@@ -1570,7 +1547,7 @@ void hwrInit() {
     auto *t = new QTimer(app);
     QObject::connect(t, &QTimer::timeout, app, [] {
         if (!uiReady()) return;   // nothing UI-side before the passcode screen is gone (ghosting there)
-        loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); tryInjectAddText(); closeStaleAddPlace(); releaseIdleGlyphs(); updateCurrentPage();
+        loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); updateTextObjAvailable(); updateCurrentPage();
 #ifdef RMPP_HWR_DEV
         watchCmdFile();
 #endif
