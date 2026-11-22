@@ -24,7 +24,7 @@ struct PendingConv {
 QList<std::shared_ptr<PendingConv>> g_convQueue;   // one copy at a time
 
 void appendRecord(const QJsonObject &o) {
-    QDir().mkpath(QLatin1String(kLibDir));
+    QDir().mkpath(QLatin1String(kDataDir));
     QFile f(recordsPath());
     if (!f.open(QIODevice::Append | QIODevice::Text)) return;
     f.write(QJsonDocument(o).toJson(QJsonDocument::Compact) + '\n');
@@ -112,10 +112,10 @@ void startNextConv() {
 void collectConversion(const QString &doc, const QList<int> &pages, const QString &src, const QString &dst,
                        const QStringList &lines, const QString &ink, const QString &kind) {
     if (!g_state->value(QStringLiteral("collect")).toBool() || doc.isEmpty() || pages.isEmpty()) {
-        if (!ink.isEmpty()) QFile::remove(QLatin1String(kLibDir) + QLatin1Char('/') + ink);
+        if (!ink.isEmpty()) QFile::remove(QLatin1String(kDataDir) + QLatin1Char('/') + ink);
         return;
     }
-    const QString dir = currentModelDir().isEmpty() ? QLatin1String(kLibDir) : currentModelDir();
+    const QString dir = currentModelDir().isEmpty() ? QLatin1String(kDataDir) : currentModelDir();
     const QString model = modelName(dir, QStringLiteral("rmpp-hwr-korean-base"));
     QString lang = modelLanguage(dir, model);
     if (lang.isEmpty()) lang = QStringLiteral("ko");
@@ -134,9 +134,9 @@ void collectConversion(const QString &doc, const QList<int> &pages, const QStrin
 // The recognized ink of a lasso / page-replace conversion as a PNG (kept with the record).
 QString saveInkImage(const QImage &img) {
     if (img.isNull() || !g_state->value(QStringLiteral("collect")).toBool()) return QString();
-    QDir().mkpath(QLatin1String(kLibDir) + QStringLiteral("/ink"));
+    QDir().mkpath(QLatin1String(kDataDir) + QStringLiteral("/ink"));
     const QString rel = QStringLiteral("ink/%1.png").arg(QDateTime::currentMSecsSinceEpoch());
-    return img.save(QLatin1String(kLibDir) + QLatin1Char('/') + rel) ? rel : QString();
+    return img.save(QLatin1String(kDataDir) + QLatin1Char('/') + rel) ? rel : QString();
 }
 
 const char *kConvQml = R"QML(

@@ -1,6 +1,6 @@
 # collect: handwriting to training data
 
-PC-side tool. Reads (never writes) the tablet over ssh and turns your handwriting into
+PC-side tool. Reads (never writes) the Paper Pro over ssh and turns your handwriting into
 `line image <TAB> text` pairs for the Korean/English/digit recognizer. One file: `collect.py`.
 
 ```
@@ -13,7 +13,7 @@ images look like what the model sees at inference.
 
 ## Two sources of data
 
-1. **Conversions.** Use "Convert page" on the tablet, then fix the typed text on the new page. `pull`
+1. **Conversions.** Use "Convert page" on the Paper Pro, then fix the typed text on the new page. `pull`
    pairs each handwritten line with the corrected text line.
 2. **Practice notebook ("보고 따라 쓰기").** A PDF with a prompt and an empty writing band per
    sentence; you copy the prompt by hand. The prompt is the label, so no correcting is needed.
@@ -56,7 +56,7 @@ data/practice/*.json                   sidecars remembered between pulls
   30 px below the band). `pull` reports strokes outside every band; if that number is large the
   page offset is wrong, try `--y-offset`.
 
-## Practice PDF on the tablet
+## Practice PDF on the Paper Pro
 
 `practice` makes a 1620x2160 px page at 229 dpi (509.3 x 679.1 pt), 6 prompts per page. PDF
 coordinates map to `.rm` coordinates as x = px - 810 (centred on 0), y = px from the top; the
@@ -65,7 +65,7 @@ The font is Noto Sans KR (OFL), embedded as a subset; it is taken from `C:/Windo
 downloaded once into `collect/fonts/` (6 MB, not meant for git).
 
 `make-doc` writes `<uuid>.pdf`, `<uuid>.metadata`, `<uuid>.content` into `stage/` and records the
-uuid in `practice.json`. To put it on the tablet (you do this by hand):
+uuid in `practice.json`. To put it on the Paper Pro (you do this by hand):
 
 ```
 scp stage/<uuid>.* root@10.11.99.1:/home/root/.local/share/remarkable/xochitl/

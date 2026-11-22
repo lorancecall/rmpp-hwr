@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <vector>
 #include <functional>
@@ -15,6 +17,7 @@
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDateTime>
 #include <QtCore/QDir>
+#include <QtCore/QElapsedTimer>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
 #include <QtCore/QHash>
@@ -46,7 +49,20 @@
 
 namespace {
 
-const char *kLibDir = "/home/root/.local/share/rmpp-hwr";   // librmpp_hwr.so, libonnxruntime.so, rec.onnx, dict.txt
+// User data (records, practice, ink.json, user models in models/); also the libraries and model of a hand install
+// (`hwr install`) or a release install from before the Vellum packages.
+const char *kDataDir = "/home/root/.local/share/rmpp-hwr";
+// Vellum package rmpp-hwr: librmpp_hwr.so, libonnxruntime.so, glyphs.json, texts/
+const char *kPkgDir = "/home/root/.vellum/share/rmpp-hwr";
+// Vellum model packages rmpp-hwr-<lang>/ (pack.json, rec.onnx, dict.txt, model.txt) live next to it
+const char *kPkgShare = "/home/root/.vellum/share";
+
+// A file rmpp-hwr ships: the package's copy, else the one in the data dir.
+QString libFile(const QString &name) {
+    const QString p = QLatin1String(kPkgDir) + QLatin1Char('/') + name;
+    return QFileInfo::exists(p) ? p : QLatin1String(kDataDir) + QLatin1Char('/') + name;
+}
+
 const char *kPages = "/home/root/.local/share/remarkable/xochitl";
 
 const char *kConf = "/home/root/.config/rmpp-hwr/settings.conf";
@@ -78,6 +94,8 @@ void loadSettings() {
     g_state->insert(QStringLiteral("pageReplace"), s.value(QStringLiteral("pageReplace"), false).toBool());
     const QString model = s.value(QStringLiteral("model"), QStringLiteral("deployed")).toString();
     g_state->insert(QStringLiteral("hwrModel"), model == QLatin1String("builtin") ? QStringLiteral("deployed") : model);
+    // settings from before v0.4 have no name: the deployed model of then is the Korean one (the package's name)
+    g_state->insert(QStringLiteral("hwrModelName"), s.value(QStringLiteral("modelName")).toString());
 }
 
 void saveSetting(const QString &key, const QVariant &v) {
@@ -104,9 +122,10 @@ Hwr g_hwr;
 bool loadLib(QString *err) {
     if (g_hwr.lib) return true;
     // the recognizer loads onnxruntime next to the model unless ORT_DYLIB_PATH is set; models in models/<name>/ have
-    // no copy of it, so point it at the one installed in kLibDir
-    setenv("ORT_DYLIB_PATH", (QByteArray(kLibDir) + "/libonnxruntime.so").constData(), 0);
-    const QByteArray so = QByteArray(kLibDir) + "/librmpp_hwr.so";
+    // no copy of it, so point it at the installed one (package, else data dir)
+    setenv("ORT_DYLIB_PATH", libFile(QStringLiteral("libonnxruntime.so")).toUtf8().constData(), 0);
+    const QByteArray so = libFile(QStringLiteral("librmpp_hwr.so")).toUtf8();
+    qWarning("[rmpp-hwr] recognizer library: %s", so.constData());
     g_hwr.lib = dlopen(so.constData(), RTLD_NOW | RTLD_LOCAL);
     if (!g_hwr.lib) { *err = QString::fromLocal8Bit(dlerror()); return false; }
     g_hwr.open = reinterpret_cast<void *(*)(const char *)>(dlsym(g_hwr.lib, "rmpp_hwr_open"));
@@ -118,10 +137,13 @@ bool loadLib(QString *err) {
 }
 
 // ---- models (Settings > Handwriting > Recognition) ----
-// "deployed": rec.onnx / dict.txt / model.txt in kLibDir (what `hwr deploy` and the installer write);
-// models/<folder>/ with the same three files: more models to pick from (grouped by language). With the converter set to
-// "remarkable" the recognizer is off and
-// reMarkable's own recognizer is used. A model is named by the first line of its model.txt (else its folder).
+// Models, each a folder with rec.onnx / dict.txt / model.txt (/ pack.json), grouped by language in the settings:
+// - "pkg:<package>": Vellum model packages, /home/root/.vellum/share/rmpp-hwr-<lang>/ (removed with `vellum del`,
+//   never deleted from the settings)
+// - "deployed": the files in kDataDir itself (`hwr deploy`, release installs from before the packages)
+// - "<folder>": user models in kDataDir/models/<folder>/ (`hwr install`, trained models; may be deleted)
+// The chosen model is remembered by id (setting "model"). With the converter set to "remarkable" the recognizer is off
+// and reMarkable's own recognizer is used. A model is named by the first line of its model.txt (else its folder).
 QString modelName(const QString &dir, const QString &fallback) {
     QFile f(dir + QStringLiteral("/model.txt"));
     if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -131,7 +153,7 @@ QString modelName(const QString &dir, const QString &fallback) {
     return fallback;
 }
 
-struct ModelEntry { QString id, name, dir; };
+struct ModelEntry { QString id, name, dir; bool packaged = false; };
 
 // Language of a model: pack.json {"language": "ko"} in its folder, else guessed from its name.
 QString modelLanguage(const QString &dir, const QString &name) {
@@ -162,32 +184,53 @@ bool languageBefore(const QString &a, const QString &b) {
     return rank(a) != rank(b) ? rank(a) < rank(b) : a < b;
 }
 
+bool isModelDir(const QString &dir) {
+    return QFileInfo::exists(dir + QStringLiteral("/rec.onnx")) && QFileInfo::exists(dir + QStringLiteral("/dict.txt"));
+}
+
+// Packaged models first, then the deployed one, then user models; a model whose name is already listed is skipped
+// (a release install's copy of a model that is now packaged).
 QList<ModelEntry> listModels() {
     QList<ModelEntry> out;
-    const QString top = QLatin1String(kLibDir);
-    QString deployedName;
-    if (QFileInfo::exists(top + QStringLiteral("/rec.onnx"))) {
-        deployedName = modelName(top, QStringLiteral("rmpp-hwr-korean-base"));
-        out.append({QStringLiteral("deployed"), deployedName, top});
+    QSet<QString> names;
+    const QDir share{QLatin1String(kPkgShare)};
+    for (const QString &d : share.entryList({QStringLiteral("rmpp-hwr-*")}, QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
+        const QString dir = share.filePath(d);
+        if (!isModelDir(dir) || !QFileInfo::exists(dir + QStringLiteral("/pack.json"))) continue;
+        const QString name = modelName(dir, d);
+        if (names.contains(name)) continue;
+        names.insert(name);
+        out.append({QStringLiteral("pkg:") + d, name, dir, true});
+    }
+    const QString top = QLatin1String(kDataDir);
+    if (isModelDir(top)) {
+        const QString name = modelName(top, QStringLiteral("rmpp-hwr-korean-base"));
+        if (!names.contains(name)) { names.insert(name); out.append({QStringLiteral("deployed"), name, top}); }
     }
     const QDir models(top + QStringLiteral("/models"));
     for (const QString &d : models.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
         const QString dir = models.filePath(d);
-        if (!QFileInfo::exists(dir + QStringLiteral("/rec.onnx")) || !QFileInfo::exists(dir + QStringLiteral("/dict.txt"))) continue;
+        if (!isModelDir(dir)) continue;
         const QString name = modelName(dir, d);
-        if (!deployedName.isEmpty() && name == deployedName) continue;   // the deployed copy is listed once
+        if (names.contains(name)) continue;
+        names.insert(name);
         out.append({d, name, dir});
     }
     return out;
 }
 
-// The model directory to use now ("" = builtin). A selected model that is gone falls back to the deployed one.
+// The model directory to use now ("" = builtin). The selected model, else (gone, or listed under another id since
+// it was packaged) the model of the same name, else the Korean package, else the deployed files, else the first one.
 QString currentModelDir() {
     if (g_state->value(QStringLiteral("converter")).toString() != QLatin1String("rmpp")) return QString();
     const QString sel = g_state->value(QStringLiteral("hwrModel")).toString();
-    for (const ModelEntry &m : listModels())
-        if (m.id == sel) return m.dir;
-    return QLatin1String(kLibDir);
+    const QString selName = g_state->value(QStringLiteral("hwrModelName")).toString();
+    const QList<ModelEntry> all = listModels();
+    for (const ModelEntry &m : all) if (m.id == sel) return m.dir;
+    for (const ModelEntry &m : all) if (!selName.isEmpty() && m.name == selName) return m.dir;
+    for (const char *id : {"pkg:rmpp-hwr-ko", "deployed"})
+        for (const ModelEntry &m : all) if (m.id == QLatin1String(id)) return m.dir;
+    return all.isEmpty() ? QLatin1String(kDataDir) : all.first().dir;
 }
 
 bool builtinRecognizer() { return g_state->value(QStringLiteral("converter")).toString() != QLatin1String("rmpp"); }
@@ -224,7 +267,7 @@ QStringList pageText(const QString &doc, const QString &page) {
 // ---- conversion records (conversions.jsonl, one JSON object per Convert page) ----
 // fields: time, doc, src (handwritten page), dst (typed page), lines (recognized), corrected (time, when the
 // user pressed "Done correcting"; only those records are used for training).
-QString recordsPath() { return QLatin1String(kLibDir) + QStringLiteral("/conversions.jsonl"); }
+QString recordsPath() { return QLatin1String(kDataDir) + QStringLiteral("/conversions.jsonl"); }
 
 QList<QJsonObject> readRecords() {
     QList<QJsonObject> out;
@@ -301,9 +344,9 @@ void refreshInfo() {
         byLang[l].append(QJsonObject{{QStringLiteral("id"), e.id}, {QStringLiteral("name"), e.name},
                                      {QStringLiteral("info"), QStringLiteral("%1 MB, %2").arg(f.size() / 1048576.0, 0, 'f', 1)
                                          .arg(f.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm")))
-                                         + (e.id == QLatin1String("deployed") ? QStringLiteral(", deployed") : QString())},
-                                     // the deployed files (installer / `hwr deploy`) are not deleted from the tablet
-                                     {QStringLiteral("deletable"), e.id != QLatin1String("deployed")}});
+                                         + (e.packaged ? QStringLiteral(", package") : e.id == QLatin1String("deployed") ? QStringLiteral(", deployed") : QString())},
+                                     // packages go with `vellum del`; the deployed files (`hwr deploy`) stay
+                                     {QStringLiteral("deletable"), !e.packaged && e.id != QLatin1String("deployed")}});
     }
     std::sort(order.begin(), order.end(), languageBefore);
     QJsonArray langs;
@@ -311,7 +354,7 @@ void refreshInfo() {
         langs.append(QJsonObject{{QStringLiteral("code"), l}, {QStringLiteral("name"), languageName(l)}, {QStringLiteral("models"), byLang[l]}});
     g_state->insert(QStringLiteral("languageList"), QString::fromUtf8(QJsonDocument(langs).toJson(QJsonDocument::Compact)));
     g_state->insert(QStringLiteral("languageInUse"), curLang.isEmpty() ? QString() : languageName(curLang));
-    const QString dir = cur.isEmpty() ? QLatin1String(kLibDir) : cur;
+    const QString dir = cur.isEmpty() ? QLatin1String(kDataDir) : cur;
     QFileInfo m(dir + QStringLiteral("/rec.onnx"));
     const QString name = modelName(dir, QStringLiteral("rmpp-hwr-korean-base"));
     g_state->insert(QStringLiteral("modelName"), cur.isEmpty() ? QStringLiteral("reMarkable built-in")
@@ -376,7 +419,7 @@ void deleteConversions(const QString &time) {
     for (const QJsonObject &o : readRecords()) {
         if (time.isEmpty() || o.value(QStringLiteral("time")).toString() == time) {
             const QString ink = o.value(QStringLiteral("ink")).toString();
-            if (!ink.isEmpty()) QFile::remove(QLatin1String(kLibDir) + QLatin1Char('/') + ink);
+            if (!ink.isEmpty()) QFile::remove(QLatin1String(kDataDir) + QLatin1Char('/') + ink);
         } else {
             recs << o;
         }
@@ -391,7 +434,7 @@ void setStatus(const QString &s, bool busy);
 void deleteModel(const QString &id) {
     if (id.isEmpty() || id == QLatin1String("deployed") || id.contains(QLatin1Char('/')) || id.startsWith(QLatin1Char('.'))) return;
     for (const ModelEntry &e : listModels()) {
-        if (e.id != id) continue;
+        if (e.id != id || e.packaged) continue;
         if (e.dir == currentModelDir()) { setStatus(QStringLiteral("the model in use is not deleted"), false); return; }
         if (g_hwr.rec && g_hwr.recDir == e.dir) return;   // still loaded (should not happen: it is not the one in use)
         const bool ok = QDir(e.dir).removeRecursively();
@@ -518,9 +561,9 @@ void convertCurrentPage() {
     setStatus(QStringLiteral("Converting…"), true);
     dv->setProperty("_rmppHwrSrc", pageId);
     // Keep a copy of exactly the ink that is recognized: later edits or deleting the page don't change the sample.
-    QDir().mkpath(QLatin1String(kLibDir) + QStringLiteral("/ink"));
+    QDir().mkpath(QLatin1String(kDataDir) + QStringLiteral("/ink"));
     const QString ink = QStringLiteral("ink/%1-%2.rm").arg(pageId).arg(QDateTime::currentMSecsSinceEpoch());
-    dv->setProperty("_rmppHwrInk", QFile::copy(path, QLatin1String(kLibDir) + QLatin1Char('/') + ink) ? ink : QString());
+    dv->setProperty("_rmppHwrInk", QFile::copy(path, QLatin1String(kDataDir) + QLatin1Char('/') + ink) ? ink : QString());
     std::thread([dv, page, path] {
         QString err;
         QStringList lines;
@@ -699,7 +742,7 @@ Rectangle {
                     { key: "lang", label: "Language",
                       text: hwr.languageInUse ? hwr.languageInUse + ": " + page.modelInUseName() : "No model installed" },
                     { key: "convert", label: "Convert",
-                      text: "Page: " + (hwr.pageReplace ? "into the page" : "on a new page") + ".  Lasso: " + (hwr.textObject ? "text object" : "typed text") + "." },
+                      text: "Page: " + (hwr.pageReplace ? "into the page" : "on a new page") + ".  Lasso: " + (hwr.textObject && hwr.textObjAvailable ? "text object" : "typed text") + "." },
                     { key: "collect", label: "Collect training data",
                       text: "Save conversions: " + (hwr.collect ? "on" : "off") + ", " + (hwr.conversions || 0) + " saved." }
                 ] : []
@@ -807,7 +850,7 @@ Rectangle {
             ArkControls.Panel {
                 visible: page.sub === "convert"
                 label: "Lasso convert"
-                description: hwr.textObject
+                description: hwr.textObject && hwr.textObjAvailable
                     ? "The convert button under a lasso selection writes the recognized text as a text object: ink in the language's font that you can move, resize and erase. Double tap it to edit its text, weight and size."
                     : "The convert button under a lasso selection recognizes the handwriting and types the text into the page's text, on the line at the height of the handwriting."
                 Layout.fillWidth: true
@@ -815,11 +858,13 @@ Rectangle {
             ArkControls.Panel {
                 visible: page.sub === "convert"
                 label: "Text object mode"
-                description: "Write the result as an editable text object instead of typed text."
+                description: hwr.textObjAvailable ? "Write the result as an editable text object instead of typed text."
+                                                  : "Needs the rmpp-textobj add-on."
                 Layout.fillWidth: true
                 Layout.leftMargin: ArkControls.Values.margin.horizontal.large
                 action: ArkControls.Toggle {
-                    checked: !!hwr.textObject
+                    checked: !!hwr.textObject && !!hwr.textObjAvailable
+                    enabled: !!hwr.textObjAvailable
                     MouseArea {
                         anchors.fill: parent
                         anchors.margins: -20
@@ -831,9 +876,9 @@ Rectangle {
                 visible: page.sub === "convert"
                 label: "Replace the handwriting"
                 description: hwr.lassoReplace
-                    ? (hwr.textObject ? "The handwriting is removed and the text object takes its place (undo brings it back)."
+                    ? (hwr.textObject && hwr.textObjAvailable ? "The handwriting is removed and the text object takes its place (undo brings it back)."
                                       : "The handwriting is removed once the text is typed in (undo brings it back).")
-                    : (hwr.textObject ? "The handwriting stays; the text object is written below it."
+                    : (hwr.textObject && hwr.textObjAvailable ? "The handwriting stays; the text object is written below it."
                                       : "The handwriting stays and moves down, below the typed text.")
                 Layout.fillWidth: true
                 Layout.leftMargin: ArkControls.Values.margin.horizontal.large
@@ -1274,7 +1319,7 @@ void probeObject(QObject *o, int depth, QSet<QObject *> &seen, QSet<QByteArray> 
 }
 
 void probe() {
-    QFile f(QLatin1String(kLibDir) + QStringLiteral("/probe.txt"));
+    QFile f(QLatin1String(kDataDir) + QStringLiteral("/probe.txt"));
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return;
     QTextStream out(&f);
     QSet<QObject *> seen;
@@ -1289,7 +1334,7 @@ void probe() {
 void devCommand(const QString &cmd);
 
 void watchCmdFile() {
-    const QString p = QLatin1String(kLibDir) + QStringLiteral("/cmd");
+    const QString p = QLatin1String(kDataDir) + QStringLiteral("/cmd");
     QFile f(p);
     if (!f.exists() || !f.open(QIODevice::ReadOnly)) return;
     const QString cmd = QString::fromUtf8(f.readAll()).trimmed();
@@ -1301,6 +1346,13 @@ void watchCmdFile() {
 
 void devCommand(const QString &cmd) {
     if (cmd == QLatin1String("probe")) probe();
+    else if (cmd == QLatin1String("state")) {   // the UI state (settings, model list) to state.txt
+        refreshInfo();
+        QFile f(QLatin1String(kDataDir) + QStringLiteral("/state.txt"));
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+            for (const QString &k : g_state->keys()) f.write((k + QStringLiteral(" = ") + g_state->value(k).toString() + QLatin1Char('\n')).toUtf8());
+        qWarning("[rmpp-hwr] model dir in use: %s", qPrintable(currentModelDir()));
+    }
     else if (cmd == QLatin1String("ink")) convertSelectionToInk(false);
     else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
     else if (cmd.startsWith(QLatin1String("load "))) {   // load <path.so> [arg]: run an experiment without restarting
@@ -1321,9 +1373,9 @@ MouseArea {
     anchors.fill: parent
     z: 1000
     enabled: hwr.converter === "rmpp"
-    onClicked: hwr.command = (hwr.textObject ? "ink#" : "text#") + Date.now()
+    onClicked: hwr.command = (hwr.textObject && hwr.textObjAvailable ? "ink#" : "text#") + Date.now()
     // the text-object icon only while the tap is ours; the Binding restores xochitl's icon otherwise
-    Binding { target: btnRef; property: "iconSource"; value: inkIcon; when: hwr.converter === "rmpp" && !!hwr.textObject }
+    Binding { target: btnRef; property: "iconSource"; value: inkIcon; when: hwr.converter === "rmpp" && !!hwr.textObject && !!hwr.textObjAvailable }
 }
 )QML";
 
@@ -1333,7 +1385,7 @@ QString inkIconUrl() {
     static QString url;
     if (!url.isEmpty()) return url;
     QFile in(QStringLiteral(":/ark/icons/hwc"));
-    const QString out = QLatin1String(kLibDir) + QStringLiteral("/ink_convert.svg");
+    const QString out = QLatin1String(kDataDir) + QStringLiteral("/ink_convert.svg");
     QString svg;
     if (in.open(QIODevice::ReadOnly)) {
         const QString src = QString::fromUtf8(in.readAll());
@@ -1407,21 +1459,10 @@ void watchSelection() {
     QMetaObject::connect(sc, sig, hook, QObject::staticMetaObject.methodCount(), Qt::DirectConnection, nullptr);
 }
 
-// Double tap on a lasso selection of converted ink opens the edit box: the selection handler's drag area emits
-// doubleClicked (pen and finger). Hooked once per area.
-void watchDoubleTap() {
-    QQuickItem *h = findAnywhere([](QQuickItem *i) { return classStarts(i, "SceneSelectionHandler"); });
-    if (!h) return;
-    for (QQuickItem *k : h->childItems()) {
-        if (!k->inherits("QQuickMouseArea") || k->property("_rmppHwrTap").toBool()) continue;
-        const int sig = k->metaObject()->indexOfSignal("doubleClicked(QQuickMouseEvent*)");
-        if (sig < 0) continue;
-        k->setProperty("_rmppHwrTap", true);
-        auto *hook = new SignalHook;
-        hook->setParent(k);
-        hook->fn = [] { QTimer::singleShot(0, qApp, [] { convertSelectionToInk(false, true); }); };
-        QMetaObject::connect(k, sig, hook, QObject::staticMetaObject.methodCount(), Qt::DirectConnection, nullptr);
-    }
+// rmpp-textobj is loaded: the lasso convert button can make text objects (Settings > Handwriting > Convert).
+void updateTextObjAvailable() {
+    const bool on = textObj().ok();
+    if (g_state->value(QStringLiteral("textObjAvailable")).toBool() != on) g_state->insert(QStringLiteral("textObjAvailable"), on);
 }
 
 void hwrInit() {
@@ -1436,6 +1477,7 @@ void hwrInit() {
     g_state->insert(QStringLiteral("command"), QString());
     g_state->insert(QStringLiteral("converter"), QStringLiteral("remarkable"));
     g_state->insert(QStringLiteral("hwrModel"), QStringLiteral("deployed"));
+    g_state->insert(QStringLiteral("hwrModelName"), QString());
     g_state->insert(QStringLiteral("textObject"), false);
     g_state->insert(QStringLiteral("lassoReplace"), false);
     g_state->insert(QStringLiteral("pageReplace"), false);
@@ -1447,9 +1489,7 @@ void hwrInit() {
     g_state->insert(QStringLiteral("practiceBusy"), false);
     g_state->insert(QStringLiteral("practiceLangs"), QStringLiteral("[]"));
     g_state->insert(QStringLiteral("practiceList"), QStringLiteral("[]"));
-    g_state->insert(QStringLiteral("inkText"), QString());
-    g_state->insert(QStringLiteral("inkWeight"), 1);
-    g_state->insert(QStringLiteral("inkSize"), 100);
+    g_state->insert(QStringLiteral("textObjAvailable"), false);   // rmpp-textobj is loaded (text objects)
     QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
         if (key != QLatin1String("command")) return;
         const QString cmd = v.toString().section(QLatin1Char('#'), 0, 0);
@@ -1458,10 +1498,8 @@ void hwrInit() {
             else convertCurrentPage();
         }
         else if (cmd == QLatin1String("ink")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool());
-        else if (cmd == QLatin1String("text")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool(), false, true);
+        else if (cmd == QLatin1String("text")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool(), true);
         else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
-        else if (cmd == QLatin1String("inkok")) finishInkEdit(true);
-        else if (cmd == QLatin1String("inkcancel")) finishInkEdit(false);
         else if (cmd == QLatin1String("refresh")) { refreshInfo(); refreshPracticeLangs(); refreshPracticeList(); }
         else if (cmd.startsWith(QLatin1String("practice:new:"))) {   // practice:new:<lang>:<topic,topic>:<pages>
             newPractice(cmd.section(QLatin1Char(':'), 2, 2),
@@ -1487,9 +1525,14 @@ void hwrInit() {
         else if (cmd.startsWith(QLatin1String("model:"))) {
             // settings.conf key "model"; in the QML map it is "hwrModel": a map key named "model" broke xochitl's
             // toolbar (tools failed with "Required property toolbar was not initialized")
+            // the name too: a model that moves (release install -> package) stays chosen
+            QString name;
+            for (const ModelEntry &m : listModels()) if (m.id == cmd.mid(6)) name = m.name;
             g_state->insert(QStringLiteral("hwrModel"), cmd.mid(6));
+            g_state->insert(QStringLiteral("hwrModelName"), name);
             QSettings st(QLatin1String(kConf), QSettings::IniFormat);
             st.setValue(QStringLiteral("model"), cmd.mid(6));
+            st.setValue(QStringLiteral("modelName"), name);
             st.sync();
             refreshInfo();   // the recognizer reloads with the new model on its next use
         }
@@ -1504,7 +1547,7 @@ void hwrInit() {
     auto *t = new QTimer(app);
     QObject::connect(t, &QTimer::timeout, app, [] {
         if (!uiReady()) return;   // nothing UI-side before the passcode screen is gone (ghosting there)
-        loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage();
+        loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); updateTextObjAvailable(); updateCurrentPage();
 #ifdef RMPP_HWR_DEV
         watchCmdFile();
 #endif

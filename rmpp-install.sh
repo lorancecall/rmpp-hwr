@@ -10,7 +10,6 @@ mkdir -p "$D"
 for f in librmpp_hwr.so libonnxruntime.so; do
 	cp "$f" "$D/$f.new" && mv -f "$D/$f.new" "$D/$f"
 done
-cp glyphs.json "$D/glyphs.json.new" && mv -f "$D/glyphs.json.new" "$D/glyphs.json"   # strokes for Convert to ink
 rm -f "$D/librmpp_hwr_ink.so"               # left over from the Convert to ink prototype
 if [ -f texts.tar ]; then                   # practice texts per language: $D/texts/<lang>/<topic>.txt
 	rm -rf "$D/texts.new" && mkdir -p "$D/texts.new" && tar -xf texts.tar -C "$D/texts.new"

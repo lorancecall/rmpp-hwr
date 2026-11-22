@@ -4,85 +4,59 @@
 
 *Lasso your handwriting and tap Convert: typed text on the line where you wrote it, or a text object you can move and edit (v0.3).*
 
-**Open handwriting recognition for the reMarkable Paper Pro, running on the tablet itself**: no cloud, no account,
+**Open handwriting recognition for the reMarkable Paper Pro, running on the device itself**: no cloud, no account,
 your notes never leave the device. Select handwriting with the lasso and turn it into clean text or tidy pen
-strokes, recognize a whole page, and train a model on your own handwriting.
+strokes, recognize a whole page, and train a model on your own handwriting. Runs without xovi and keeps working
+after a reboot.
 
-It starts with Korean, English and digits, and grows with the reMarkable community: the open dataset
-[rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db) collects handwriting in many languages from people who
-write on the tablet, `hwr contribute` shares your practice pages to it (anonymized, CC BY 4.0), and the public
-models are trained on it regularly. Every language that gathers writers there can be recognized here next.
+Made for and tested on the reMarkable Paper Pro with OS 3.29 only; other reMarkable models are not supported
+and their compatibility is not guaranteed. Following newer OS versions happens when I have time, and may not happen.
 
-On the tablet (Settings > Handwriting: switch the converter from reMarkable to rmpp-hwr; reMarkable's own convert
-stays the default):
+> Part of the **rmpp add-ons**, built on [rmpp-packages](https://github.com/lorancecall/rmpp-packages): it is
+> installed by rmpp setup, loaded into xochitl at every boot by rmpp-preload (no xovi), and kept up to date with
+> Vellum. How that differs from xovi: [how it works](https://github.com/lorancecall/rmpp-packages/blob/main/docs/how-it-works.md).
+>
+> Status: experimental.
 
-- **Convert with the lasso**: select handwriting and tap Convert. By default the text is typed into the page's text
-  on the line where you wrote it; Settings > Handwriting > Convert can delete the ink first, or make a **text
-  object** instead: the text as clean pen strokes (Noto Sans KR glyphs) that you can move and resize like ink.
-  Double tap a text object to **edit the text** in a keyboard box (Korean and other languages via
-  [rmpp-lang](https://github.com/lorancecall/rmpp-lang)); closing the box redraws it in place, wrapped at its width.
-- **Convert page** (toolbar): recognizes the whole page and adds the text as a new page (or, if you choose, replaces
-  the page's ink with typed text line by line).
-- **Languages and models** (Settings > Handwriting > Language): the release brings the Korean model (Korean, English,
-  digits) and base packs for Chinese, Japanese, English and Latin-script languages (official PaddleOCR PP-OCRv5
-  models converted to ONNX, Apache-2.0). Pick a language, then a model; models can be deleted there too.
-- **Collect training data** (Settings > Handwriting): keeps your conversions and corrections so a model can be
-  trained on your own handwriting.
-
-> Status: experimental. rmpp-hwr is not a Vellum package, because models change often: install it with the
-> [rmpp installer](https://github.com/lorancecall/rmpp-packages) (it downloads the latest release, ~80 MB in /home)
-> or with its own PC tool (`hwr install`, below). It only needs `rmpp-preload` from rmpp-packages on the tablet.
-
-## What is here
-
-| Path | What |
-|---|---|
-| `src/` | Rust recognizer: reads `.rm` pages, renders lines, runs the PaddleOCR PP-OCRv5 Korean recognition model (ONNX, onnxruntime). Also exports the typed text of a page. |
-| `ui/` | xochitl add-on (LD_PRELOAD): lasso Convert to ink and text editing (`ui/ink.h`), "Convert page" in the toolbar, Settings > Handwriting (records, corrections, model info). `ui/exp/`: experiments for the developer loader (`DEV=1 ui/build.sh`). |
-| `ink/` | `glyphs.py`: builds `glyphs.json` (text -> pen strokes) from the centre lines of Noto Sans KR (OFL, see NOTICE). |
-| `model/` | base model `rec.onnx` + `dict.txt` (PaddleOCR `korean_PP-OCRv5_mobile_rec`, Apache-2.0, see NOTICE). |
-| `collect/` | practice notebooks (v1 lines, v2 structured pages with per-character cells), pulling handwriting from the tablet, line/character images. |
-| `tools/hwr` | one command for the whole loop: `practice`, `pull`, `qc`, `upload`, `train`, `fetch`, `eval`, `deploy`, `contribute`, ... |
-| `train/` | fine-tuning jobs that run on a local GPU or a Slurm cluster, configured by `.env` (see `train/README.md`). |
-| `references/` | literature notes on improving personal handwriting recognition (cumulative). |
-
-## Guides
-
-- [WORKFLOW.md](WORKFLOW.md): from practice notebook to personal model on the tablet.
-- [train/README.md](train/README.md): training backends (`.env`: local GPU or Slurm), jobs, known pitfalls.
-- [references/README.md](references/README.md): what to try next and why.
-- [references/convert-to-ink.md](references/convert-to-ink.md): how Convert to ink works inside xochitl (findings,
-  internals used, limits).
-- Open dataset: [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db), the community's handwriting in many
-  languages (how to take part, in every supported language: https://lorancecall.github.io/rmpp-hwr-db/).
-  `hwr contribute` shares structured practice pages, anonymized; your language is missing? Ask for it there.
+> **Help it read your language: join [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db).** The recognizer
+> only gets better with the handwriting people share. rmpp-hwr-db is an open dataset of real pen strokes written on
+> the Paper Pro; it is just starting, so the first writers shape it the most.
+> [**Join as a writer**](https://lorancecall.github.io/rmpp-hwr-db/) · [see the dataset](https://github.com/lorancecall/rmpp-hwr-db)
+> · How: write practice pages on the Paper Pro (Settings > Handwriting > Collect training data) and share them with
+> `hwr contribute`, anonymized (CC BY 4.0). Your language is missing? Ask for it there.
 
 ## Install
 
-Requirements: reMarkable Paper Pro with developer mode and SSH (an `ssh rmpp` alias with a key), OS 3.29,
-and `rmpp-preload` on the tablet (`vellum add rmpp-preload`, see rmpp-packages).
+Start at **[rmpp-packages](https://github.com/lorancecall/rmpp-packages#install)**: it explains developer mode and
+has **rmpp setup**, the installer for all rmpp add-ons.
 
-On the PC:
+- In rmpp setup (the desktop app or the script), tick **Handwriting recognition (beta)** (rmpp-hwr; not selected by
+  default). The other languages' models are listed under it.
+- It installs the Korean model `rmpp-hwr-ko`, `rmpp-textobj`, `rmpp-lang` and `rmpp-preload` with it
+  ([all packages and dependencies](https://github.com/lorancecall/rmpp-packages/blob/main/docs/packages.md)).
+- After a reMarkable OS update: **Restore** in rmpp setup.
+- Without rmpp setup, removing it, next to other mods, building it: [docs/install.md](docs/install.md).
 
-```sh
-git clone https://github.com/lorancecall/rmpp-hwr && cd rmpp-hwr
-uv venv ../.venv && uv pip install -p ../.venv -r collect/requirements.txt
-cp .env.example .env              # tablet address etc.; never committed
-tools/hwr install                 # UI add-on + recognizer + model onto the tablet
-```
+## Use
 
-`hwr install` keeps a model that is already on the tablet (pass `--model DIR` to replace it). Run it again after
-a reMarkable OS update. `hwr uninstall [--purge]` removes it.
+- **Lasso convert** (lasso menu): handwriting to typed text on its line, or to a movable, editable text object.
+- **Convert page** (toolbar): the whole page to text, on a new page or into the page.
+- **Models** (Settings > Handwriting): pick the language and model, or switch back to reMarkable's converter.
 
-Building from source needs the Arm GNU aarch64 toolchain, Qt 6.10 headers/device libs and onnxruntime for
-linux-aarch64 in `../sdk` (see `.cargo/config.toml` and `ui/build.sh`):
-`./build.sh` (or `ui/build.sh` and `cargo build --release --target aarch64-unknown-linux-gnu`), and
-`python ink/glyphs.py build -o build/glyphs.json` (about 90 s; downloads Noto Sans KR the first time).
+Details: [docs/usage.md](docs/usage.md).
 
-## Privacy
+## How it works
 
-No personal data goes into this repository or into contributed data: machine-specific settings live only in the
-gitignored `.env`, and `hwr contribute` sends random writer ids, practice templates and pen strokes only.
+A Rust recognizer (PaddleOCR PP-OCRv5 models, ONNX) runs on the Paper Pro; a small add-on in xochitl adds the buttons
+and settings, and hands text objects to [rmpp-textobj](https://github.com/lorancecall/rmpp-textobj). Models are
+fine-tuned on rmpp-hwr-db and your own practice pages. The code, training and references:
+[docs/develop.md](docs/develop.md).
+
+## Build
+
+[docs/install.md#build-and-install-by-hand](docs/install.md#build-and-install-by-hand).
+
+Privacy: nothing leaves the Paper Pro when you convert; `hwr contribute` sends random writer ids and pen strokes only.
 
 ## License
 

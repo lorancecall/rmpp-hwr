@@ -1,118 +1,34 @@
-// Convert to ink: recognize the lasso selection and write the text back as ordinary pen strokes (lasso-selectable,
-// movable, erasable, undoable), next to the selection or in its place. Included inside hwrui.cpp's namespace.
+// Lasso convert: recognize the lasso selection and either type the text into the page (typed text) or hand it to
+// rmpp-textobj, which draws it as a text object (ink in the language's font). Included inside hwrui.cpp's namespace.
 //
-// xochitl 3.29 internals used (no headers; found by walking meta-objects, see references/convert-to-ink.md):
-//   SceneController::addDrawingLine(Line)                   adds one finished pen stroke to the open page
-//   SceneController::cloneSelectedItems(int layer, double)  + getItemBoundingRect(items): the selection's bounds
-//   SceneController::deleteSelectedItems(int layer)         removes the selection (one undo step)
-//   PenInputLineHandler lineTool/lineColor/lineArgbCode/lineThickness: the current pen
-//   Line (88 bytes): 0x00 int tool, 0x04 int color, 0x08 uint argb, 0x10 QList<Point>, 0x28 double thickness
-//   Point (14 bytes, packed): float x, y; u16 speed, width; u8 direction, pressure  (same as .rm v6 points)
-// The Line layout is checked (size 88) before use; anything else and the feature reports an error instead.
+// Text objects are rmpp-textobj's (a separate add-on, loaded before this one: preload.d/55-rmpp-textobj.so): it owns
+// their records, glyphs, edit box and selection rules. This file only talks to its C API (see TextObj below).
+// Selected text objects are never recognized again: their text comes from rmpp-textobj.
+//
+// xochitl 3.29 internals used: SceneController::cloneSelectedItems(int layer, double) + getItemBoundingRect(items)
+// (the selection's bounds), deleteSelectedItems(int layer), addSelectionRect(QRect, mode); the lasso's
+// SelectionImage item (image() -> the selected ink at page scale).
 
-#pragma pack(push, 1)
-struct InkPt {
-    float x, y;
-    quint16 speed, width;
-    quint8 direction, pressure;
+// ---- rmpp-textobj's C API (resolved on each use: it may be installed or removed while xochitl runs) ----
+struct TextObj {
+    int (*selection)(char *, int) = nullptr;
+    int (*editSelection)() = nullptr;
+    int (*dropObjects)() = nullptr;
+    int (*putLines)(const char *, double, double, double, double, int, const char *) = nullptr;
+    bool ok() const { return selection && editSelection && dropObjects && putLines; }
 };
-#pragma pack(pop)
-static_assert(sizeof(InkPt) == 14, "Line point layout");
 
-struct Glyph {
-    double adv = 0.5;
-    QList<QList<QPointF>> strokes;
-};
-QHash<QChar, Glyph> g_glyphs;
-
-// glyphs.json (ink/glyphs.py build): {"glyphs": {char: {"adv", "strokes": [[x, y, ...]]}}}, em units, y down.
-QString g_glyphsFile;   // the file g_glyphs was loaded from
-
-QString glyphsFile() {
-    return QLatin1String(kLibDir) + QStringLiteral("/glyphs.json");
-}
-
-bool loadGlyphs() {
-    const QString file = glyphsFile();
-    if (!g_glyphs.isEmpty() && g_glyphsFile == file) return true;
-    g_glyphs.clear();
-    g_glyphsFile = file;
-    QFile f{file};
-    if (!f.open(QIODevice::ReadOnly)) return false;
-    const QJsonObject gs = QJsonDocument::fromJson(f.readAll()).object().value(QStringLiteral("glyphs")).toObject();
-    for (auto it = gs.begin(); it != gs.end(); ++it) {
-        if (it.key().size() != 1) continue;
-        const QJsonObject o = it.value().toObject();
-        Glyph g;
-        g.adv = o.value(QStringLiteral("adv")).toDouble(0.5);
-        for (const QJsonValue &s : o.value(QStringLiteral("strokes")).toArray()) {
-            const QJsonArray a = s.toArray();
-            QList<QPointF> p;
-            for (int i = 0; i + 1 < a.size(); i += 2) p.append(QPointF(a[i].toDouble(), a[i + 1].toDouble()));
-            g.strokes.append(p);
-        }
-        g_glyphs.insert(it.key().at(0), g);
-    }
-    return !g_glyphs.isEmpty();
-}
-
-// One line of text in em units (x from 0, y 0 = top of the em box). Returns the width in em.
-double layoutLine(const QString &text, QList<QList<QPointF>> *out) {
-    double x = 0;
-    for (const QChar c : text) {
-        auto it = g_glyphs.constFind(c);
-        if (it == g_glyphs.constEnd()) { x += 0.5; continue; }
-        for (const auto &s : it->strokes) {
-            QList<QPointF> p;
-            for (const QPointF &q : s) p.append(QPointF(q.x() + x, q.y()));
-            out->append(p);
-        }
-        x += it->adv + 0.04;
-    }
-    return x;
-}
-
-QList<InkPt> inkPoints(const QList<QPointF> &xy, quint16 width) {
-    QList<InkPt> out;
-    const int n = int(xy.size());
-    for (int i = 0; i < n; ++i) {
-        const int j = i + 1 < n ? i + 1 : i - 1;
-        double a = 0;
-        if (j >= 0 && j != i) {
-            const QPointF d = j > i ? xy[j] - xy[i] : xy[i] - xy[j];
-            a = std::atan2(d.y(), d.x());
-        }
-        if (a < 0) a += 2 * M_PI;
-        out.append(InkPt{float(xy[i].x()), float(xy[i].y()), 4, width, quint8(a / (2 * M_PI) * 255), 110});
-    }
-    return out;
-}
-
-// Add strokes (page coordinates) with the current pen. Returns the number added, -1 if Line is not as expected.
-// Converted text is drawn like a font: Fineliner (even width), black, thickness from the text size (em, page units).
-int addInkStrokes(QObject *sc, QObject *ph, const QList<QList<QPointF>> &strokes, double em, int weight = 1) {
-    Q_UNUSED(ph);
-    const int add = sc->metaObject()->indexOfMethod("addDrawingLine(Line)");
-    const QMetaType type = add >= 0 ? sc->metaObject()->method(add).parameterMetaType(0) : QMetaType();
-    if (add < 0 || type.sizeOf() != 88) return -1;
-    const int tool = 17;   // Finelinerv2
-    const int color = 0;   // black
-    const uint argb = 0xff000000u;
-    static const double divisor[] = {32.0, 20.0, 13.0};   // thin, medium, thick
-    const double thick = qBound(1.5, em / divisor[qBound(0, weight, 2)], 9.0);
-    for (const auto &s : strokes) {
-        void *line = type.create();
-        auto *b = static_cast<char *>(line);
-        *reinterpret_cast<int *>(b + 0x00) = tool;
-        *reinterpret_cast<int *>(b + 0x04) = color;
-        *reinterpret_cast<uint *>(b + 0x08) = argb;
-        *reinterpret_cast<QList<InkPt> *>(b + 0x10) = inkPoints(s, quint16(std::lround(thick * 6)));
-        *reinterpret_cast<double *>(b + 0x28) = thick;
-        void *argv[] = {nullptr, line};
-        sc->qt_metacall(QMetaObject::InvokeMetaMethod, add, argv);
-        type.destroy(line);
-    }
-    return int(strokes.size());
+TextObj textObj() {
+    TextObj t;
+    void *h = dlopen("/usr/lib/rmpp/rmpp-textobj/librmpp-textobj-ui.so", RTLD_NOW | RTLD_NOLOAD);
+    auto sym = [&](const char *name) { void *p = h ? dlsym(h, name) : nullptr; return p ? p : dlsym(RTLD_DEFAULT, name); };
+    auto api = reinterpret_cast<int (*)()>(sym("rmpp_textobj_api"));
+    if (!api || api() < 1) return t;
+    t.selection = reinterpret_cast<int (*)(char *, int)>(sym("rmpp_textobj_selection"));
+    t.editSelection = reinterpret_cast<int (*)()>(sym("rmpp_textobj_edit_selection"));
+    t.dropObjects = reinterpret_cast<int (*)()>(sym("rmpp_textobj_drop_objects_from_selection"));
+    t.putLines = reinterpret_cast<int (*)(const char *, double, double, double, double, int, const char *)>(sym("rmpp_textobj_put_lines"));
+    return t;
 }
 
 // Bounds of the current selection (page coordinates); empty when nothing is selected. The item list is passed
@@ -231,435 +147,6 @@ QList<InkLine> recognizeImage(const QImage &src) {
     return out;
 }
 
-// ---- placing text ----
-struct Placed {
-    QList<QList<QPointF>> strokes;
-    QPointF origin;   // top-left of the first line's em box
-    double em = 0;    // em height of the first line
-    int weight = 1;   // 0 thin, 1 medium, 2 thick
-};
-
-void appendLine(Placed *out, const QString &text, const QPointF &origin, double h) {
-    QList<QList<QPointF>> em;
-    layoutLine(text, &em);
-    for (const auto &s : em) {
-        QList<QPointF> p;
-        for (const QPointF &q : s) p.append(origin + q * h);
-        out->strokes.append(p);
-    }
-}
-
-// Recognized lines ("x0 y0 x1 y1<TAB>text") as glyph strokes: each line at the size of its handwriting, either over
-// the original line (replace) or stacked below the selection.
-Placed placeLines(const QStringList &lines, const QRectF &sel, bool replace) {
-    Placed out;
-    double yNext = sel.bottom() + 20;
-    for (const QString &l : lines) {
-        const QStringList box = l.section(QLatin1Char('\t'), 0, 0).split(QLatin1Char(' '));
-        const QString text = l.section(QLatin1Char('\t'), 1);
-        if (box.size() != 4 || text.isEmpty()) continue;
-        const QRectF b(QPointF(box[0].toDouble(), box[1].toDouble()), QPointF(box[2].toDouble(), box[3].toDouble()));
-        QList<QList<QPointF>> tmp;
-        const double w = layoutLine(text, &tmp);
-        if (w <= 0) continue;
-        // em size from the line's ink height (Hangul ink is ~0.85 em), kept within +-15% of the original width
-        double h = b.height() / 0.85;
-        if (w * h > b.width() * 1.15) h = b.width() * 1.15 / w;
-        if (w * h < b.width() * 0.85) h = qMin(b.width() * 0.85 / w, b.height() / 0.6);
-        const QPointF origin(b.left(), replace ? b.top() - 0.05 * h : yNext);
-        if (out.em == 0) { out.origin = origin; out.em = h; }
-        appendLine(&out, text, origin, h);
-        yNext = origin.y() + h * 1.15;
-    }
-    return out;
-}
-
-double lineWidth(const QString &text) {
-    QList<QList<QPointF>> tmp;
-    return layoutLine(text, &tmp);
-}
-
-// Break one paragraph into lines no wider than maxEm (em units): at spaces, or inside a word that is too long.
-QStringList wrapParagraph(const QString &para, double maxEm) {
-    QStringList out;
-    QString cur;
-    for (const QString &word : para.split(QLatin1Char(' '))) {
-        const QString tryLine = cur.isEmpty() ? word : cur + QLatin1Char(' ') + word;
-        if (cur.isEmpty() || lineWidth(tryLine) <= maxEm) {
-            cur = tryLine;
-        } else {
-            out << cur;
-            cur = word;
-        }
-        while (cur.size() > 1 && lineWidth(cur) > maxEm) {   // a single word longer than the line
-            int k = int(cur.size()) - 1;
-            while (k > 1 && lineWidth(cur.left(k)) > maxEm) --k;
-            out << cur.left(k);
-            cur = cur.mid(k);
-        }
-    }
-    if (!cur.isEmpty() || out.isEmpty()) out << cur;
-    return out;
-}
-
-// Text (paragraphs separated by '\n') at one em size, wrapped at maxWidth (page units, 0 = no wrap), lines 1.15 em
-// apart.
-Placed placeText(const QString &text, const QPointF &origin, double em, double maxWidth) {
-    Placed out;
-    out.origin = origin;
-    out.em = em;
-    double y = origin.y();
-    for (const QString &para : text.split(QLatin1Char('\n'))) {
-        const QStringList lines = maxWidth > 0 ? wrapParagraph(para, maxWidth / em) : QStringList{para};
-        for (const QString &line : lines) {
-            if (!line.trimmed().isEmpty()) appendLine(&out, line, QPointF(origin.x(), y), em);
-            y += em * 1.15;
-        }
-    }
-    return out;
-}
-
-// Select strokes with a rectangular lasso around them (SceneController::selectWithLine(Line), what the lasso tool
-// calls). Selecting the new ink lets the user move it at once and also makes xochitl redraw that area.
-void selectInk(QObject *sc, const QList<QList<QPointF>> &strokes) {
-    const int sel = sc->metaObject()->indexOfMethod("selectWithLine(Line)");
-    const QMetaType type = sel >= 0 ? sc->metaObject()->method(sel).parameterMetaType(0) : QMetaType();
-    if (sel < 0 || type.sizeOf() != 88 || strokes.isEmpty()) return;
-    QRectF r;
-    for (const auto &s : strokes)
-        for (const QPointF &p : s) r = r.isNull() ? QRectF(p, QSizeF(0.1, 0.1)) : r.united(QRectF(p, QSizeF(0.1, 0.1)));
-    r.adjust(-15, -15, 15, 15);
-    const QList<QPointF> loop{r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft(), r.topLeft()};
-    void *line = type.create();
-    auto *b = static_cast<char *>(line);
-    *reinterpret_cast<int *>(b + 0x00) = 11;   // selection tool
-    *reinterpret_cast<uint *>(b + 0x08) = 0xff000000u;
-    *reinterpret_cast<QList<InkPt> *>(b + 0x10) = inkPoints(loop, 12);
-    *reinterpret_cast<double *>(b + 0x28) = 2.0;
-    void *argv[] = {nullptr, line};
-    sc->qt_metacall(QMetaObject::InvokeMetaMethod, sel, argv);
-    type.destroy(line);
-}
-
-// ---- records of converted ink (ink.json): what lets "edit text" find the text of a selection ----
-// [{"page", "text", "n" (strokes), "w", "h" (selection bounds), "ox", "oy" (em origin relative to the bounds' top-left),
-//   "em"}]. A selection is ours when it has the same number of strokes and the same size, wherever it was moved.
-QString inkRecordsPath() { return QLatin1String(kLibDir) + QStringLiteral("/ink.json"); }
-
-QJsonArray readInkRecords() {
-    QFile f(inkRecordsPath());
-    return f.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(f.readAll()).array() : QJsonArray();
-}
-
-void writeInkRecords(const QJsonArray &a) {
-    QFile f(inkRecordsPath() + QStringLiteral(".new"));
-    if (f.open(QIODevice::WriteOnly) && f.write(QJsonDocument(a).toJson(QJsonDocument::Compact)) > 0 && f.flush()) {
-        f.close();
-        ::rename(qPrintable(f.fileName()), qPrintable(inkRecordsPath()));
-    }
-}
-
-// Same page, same number of strokes and the same aspect ratio (+-4%): moved and/or scaled, it is still our ink.
-int findInkRecord(const QJsonArray &recs, const QString &page, int n, const QRectF &sel) {
-    if (sel.height() <= 0) return -1;
-    const double aspect = sel.width() / sel.height();
-    for (int i = int(recs.size()) - 1; i >= 0; --i) {
-        const QJsonObject o = recs[i].toObject();
-        const double w = o.value(QStringLiteral("w")).toDouble(), h = o.value(QStringLiteral("h")).toDouble();
-        if (o.value(QStringLiteral("page")).toString() == page && o.value(QStringLiteral("n")).toInt() == n && h > 0
-            && qAbs(w / h - aspect) / (w / h) < 0.04)
-            return i;
-    }
-    return -1;
-}
-
-// After new ink is added and selected: measure the selection and store (or replace record `replaceIdx`). The
-// selection settles after a while (longer for big ink), so measure again until it holds all n new strokes.
-void recordInk(QPointer<QObject> scp, const QString &page, const QString &text, const Placed &pl, int n, int replaceIdx,
-               int attempt = 0) {
-    QTimer::singleShot(attempt == 0 ? 300 : 400, qApp, [=] {
-        if (!scp) return;
-        const int count = scp->property("selectionItemCount").toInt();
-        const QRectF r = count == n ? selectionRect(scp, scp->property("currentLayer").toInt()) : QRectF();
-        if (r.isEmpty()) {
-            if (attempt < 6) recordInk(scp, page, text, pl, n, replaceIdx, attempt + 1);
-            else qWarning("[rmpp-hwr] ink: new ink not selected (%d of %d), not recorded", count, n);
-            return;
-        }
-        QJsonArray recs = readInkRecords();
-        if (replaceIdx >= 0 && replaceIdx < recs.size()) recs.removeAt(replaceIdx);
-        recs.append(QJsonObject{{QStringLiteral("page"), page}, {QStringLiteral("text"), text},
-                                {QStringLiteral("n"), n}, {QStringLiteral("w"), r.width()}, {QStringLiteral("h"), r.height()},
-                                {QStringLiteral("ox"), pl.origin.x() - r.left()}, {QStringLiteral("oy"), pl.origin.y() - r.top()},
-                                {QStringLiteral("em"), pl.em}, {QStringLiteral("weight"), pl.weight}});
-        while (recs.size() > 500) recs.removeAt(0);
-        writeInkRecords(recs);
-    });
-}
-
-// One full e-paper refresh (xochitl's own ghost buster, as rmpp-refresh does) after ms: the edit box and the
-// keyboard leave ghosting behind when they close.
-void fullRefreshLater(QPointer<QQuickItem> dvp, int ms) {
-    QTimer::singleShot(ms, qApp, [dvp] {
-        QObject *gb = dvp && dvp->isVisible() ? dvp->property("ghostBuster").value<QObject *>() : nullptr;
-        if (!gb || !QMetaObject::invokeMethod(gb, "userRequestedClear")) qWarning("[rmpp-hwr] no ghost buster");
-        else qWarning("[rmpp-hwr] full refresh");
-    });
-}
-
-// ---- adding ink: deselect/delete, add after the scene settles, select the new ink, redraw ----
-// The page is redrawn once: fullRefresh (after an edit: the box and the keyboard left ghosting) = one ghost-buster
-// refresh; otherwise one updateAfterStroke. Earlier versions redrew at 0, 300 and 1000 ms and the edit added a
-// full refresh on top: the developer saw the page flash several times (2026-11-22).
-void putInk(QPointer<QObject> scp, QPointer<QObject> php, QPointer<QQuickItem> dvp, int layer, bool deleteSelection,
-            const Placed &pl, const QString &text, int replaceIdx, bool fullRefresh = false) {
-    // addDrawingLine is ignored while a selection is active
-    if (deleteSelection) QMetaObject::invokeMethod(scp, "deleteSelectedItems", Q_ARG(int, layer));
-    else QMetaObject::invokeMethod(scp, "clearSelectedItems");
-    QTimer::singleShot(400, scp, [=] {
-        if (!scp || !php) { setStatus(QStringLiteral("page closed"), false); return; }
-        const int added = addInkStrokes(scp, php, pl.strokes, pl.em, pl.weight);
-        if (added > 0) {
-            selectInk(scp, pl.strokes);
-            recordInk(scp, dvp ? dvp->property("currentPageId").toString() : scp->property("pageId").toString(), text, pl, added, replaceIdx);
-        }
-        // lines added this way are not drawn until the next redraw (updateAfterStroke is what the pen path calls).
-        // Once, after the new selection and its lasso menu have appeared (the menu repaints old screen content).
-        // After an edit the ghost-buster refresh follows right after it and clears the box's and keyboard's ghosting.
-        QTimer::singleShot(500, qApp, [dvp, fullRefresh] {
-            if (!dvp) return;
-            QMetaObject::invokeMethod(dvp, "updateAfterStroke");
-            if (fullRefresh) fullRefreshLater(dvp, 0);
-        });
-        setStatus(added < 0 ? QStringLiteral("this xochitl version is not supported") : QString(), false);
-    });
-}
-
-// ---- edit box ----
-const char *kEditQml = R"QML(
-import QtQuick
-import ark.tokens as ArkTokens
-import ark.controls as ArkControls
-import xofm.libs.peninput
-Item {
-    id: shade
-    property string initial: ""
-    property var penManager: null
-    property int weight: 1        // 0 thin, 1 medium, 2 thick
-    property int sizePct: 100     // size of the ink, relative to now
-    property int rev: 0           // bumps the preview image
-    function refresh() { hwr.inkText = input.text; hwr.inkWeight = weight; hwr.inkSize = sizePct; rev++; }
-    onWeightChanged: refresh()
-    onSizePctChanged: refresh()
-    Timer { id: typing; interval: 300; onTriggered: shade.refresh() }
-    anchors.fill: parent
-    z: 10000
-    // outside the box: the pen draws nothing on the page, and a tap closes the box (cancel)
-    PenInputBlocker { anchors.fill: parent; manager: shade.penManager }
-    MouseArea { anchors.fill: parent; onClicked: hwr.command = "inkcancel#" + Date.now() }
-Rectangle {
-    id: box
-    width: shade.width - 120; height: 740
-    x: 60; y: 90
-    color: "white"; border.color: "black"; border.width: 3
-    MouseArea { anchors.fill: parent }   // taps inside the box stay in the box
-    Text { x: 36; y: 26; text: "Edit text"; font.pixelSize: 36; font.bold: true }
-    Rectangle {
-        id: field
-        x: 36; y: 86; width: parent.width - 72; height: 260
-        border.color: "black"; border.width: 2
-        Flickable {
-            id: flick
-            anchors.fill: parent; anchors.margins: 2
-            clip: true
-            contentWidth: width; contentHeight: input.contentHeight + 2 * input.topPadding
-            boundsBehavior: Flickable.StopAtBounds
-            function ensureVisible(r) {
-                if (contentY >= r.y) contentY = r.y;
-                else if (contentY + height <= r.y + r.height + input.topPadding) contentY = r.y + r.height + input.topPadding - height;
-            }
-            TextEdit {
-                id: input
-                width: flick.width
-                leftPadding: 18; rightPadding: 18; topPadding: 14; bottomPadding: 14
-                font.pixelSize: 40
-                wrapMode: TextEdit.Wrap
-                text: shade.initial
-                focus: true
-                onCursorRectangleChanged: flick.ensureVisible(cursorRectangle)
-                onTextChanged: typing.restart()
-                Component.onCompleted: { forceActiveFocus(); cursorPosition = text.length; Qt.inputMethod.show(); shade.refresh(); }
-            }
-        }
-    }
-    Text { x: 36; y: 360; text: "Preview"; font.pixelSize: 26; color: "#555555" }
-    Rectangle {
-        x: 36; y: 400; width: parent.width - 72; height: 220
-        border.color: "#999999"; border.width: 1
-        clip: true
-        Image {
-            x: 1; y: 1; width: parent.width - 2; height: parent.height - 2
-            fillMode: Image.Pad
-            horizontalAlignment: Image.AlignLeft; verticalAlignment: Image.AlignTop
-            cache: false
-            sourceSize: Qt.size(width, height)
-            source: "image://rmpphwr/preview/" + shade.rev
-        }
-    }
-    Row {
-        x: 36; y: 636; spacing: 12
-        Repeater {
-            model: ["Thin", "Medium", "Thick"]
-            delegate: ArkControls.Button {
-                required property string modelData
-                required property int index
-                text: modelData
-                type: shade.weight === index ? ArkTokens.Button.primary : ArkTokens.Button.secondary
-                onClicked: shade.weight = index
-            }
-        }
-        Item { width: 24; height: 1 }
-        ArkControls.Button { text: "−"; type: ArkTokens.Button.secondary; onClicked: shade.sizePct = Math.max(50, shade.sizePct - 10) }
-        Text { text: shade.sizePct + "%"; font.pixelSize: 32; width: 100; horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
-        ArkControls.Button { text: "+"; type: ArkTokens.Button.secondary; onClicked: shade.sizePct = Math.min(200, shade.sizePct + 10) }
-    }
-    Row {
-        x: parent.width - width - 36; y: 636; spacing: 24
-        ArkControls.Button { text: "Cancel"; type: ArkTokens.Button.secondary; onClicked: hwr.command = "inkcancel#" + Date.now() }
-        ArkControls.Button {
-            text: "OK"
-            onClicked: {
-                Qt.inputMethod.commit();
-                hwr.inkText = input.text; hwr.inkWeight = shade.weight; hwr.inkSize = shade.sizePct;
-                hwr.command = "inkok#" + Date.now();
-            }
-        }
-    }
-}
-}
-)QML";
-
-struct InkEdit {
-    QPointer<QObject> box, sc, ph;
-    QPointer<QQuickItem> dv;
-    QString page;
-    int rec = -1;
-    int layer = 0;
-    double em = 60, maxW = 600;   // of the ink when the box opened (page units)
-};
-InkEdit g_edit;
-
-// The edit box's preview: the text as it will be drawn (glyphs, weight, size, wrap), at page scale, black on white.
-class InkPreviewProvider : public QQuickImageProvider {
-public:
-    InkPreviewProvider() : QQuickImageProvider(QQuickImageProvider::Image) {}
-    QImage requestImage(const QString &, QSize *size, const QSize &req) override {
-        const QSize sz(req.width() > 0 ? req.width() : 1400, req.height() > 0 ? req.height() : 220);
-        QImage img(sz, QImage::Format_ARGB32);
-        img.fill(Qt::white);
-        if (size) *size = sz;
-        if (!loadGlyphs()) return img;
-        const double scale = qBound(50, g_state->value(QStringLiteral("inkSize")).toInt(), 200) / 100.0;
-        const int weight = qBound(0, g_state->value(QStringLiteral("inkWeight")).toInt(), 2);
-        const double em = g_edit.em * scale;
-        const Placed pl = placeText(g_state->value(QStringLiteral("inkText")).toString().trimmed(), QPointF(12, 8), em,
-                                    g_edit.maxW * scale);
-        static const double divisor[] = {32.0, 20.0, 13.0};
-        QPainter p(&img);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(QPen(Qt::black, qBound(1.5, em / divisor[weight], 9.0), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        for (const auto &st : pl.strokes) {
-            if (st.size() == 1) p.drawPoint(st[0]);
-            else p.drawPolyline(st.constData(), int(st.size()));
-        }
-        return img;
-    }
-};
-
-void closeInkEdit() {
-    if (g_edit.box) g_edit.box->deleteLater();
-    g_edit.box = nullptr;
-    qApp->setProperty("rmppKeyboardRefresh", QVariant());
-    if (QGuiApplication::inputMethod()) QGuiApplication::inputMethod()->hide();
-}
-
-void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, const QString &text, int weight) {
-    closeInkEdit();
-    QQmlEngine *eng = qmlEngine(dv);
-    QQmlContext *base = qmlContext(dv);
-    if (!eng || !base || !dv->window()) return;
-    auto *ctx = new QQmlContext(base);
-    ctx->setContextProperty(QStringLiteral("hwr"), g_state);
-    // a child of the DocumentView: hidden and destroyed with the notebook (see also closeStaleInkEdit)
-    QObject *pin = dv->property("penInput").value<QObject *>();   // xochitl's pen input; its surface manager blocks the pen
-    QObject *mgr = pin ? pin->property("surfaceManager").value<QObject *>() : nullptr;
-    if (!eng->imageProvider(QStringLiteral("rmpphwr"))) eng->addImageProvider(QStringLiteral("rmpphwr"), new InkPreviewProvider);
-    // size of the ink now (it may have been scaled since it was made), for the preview
-    const QJsonArray recs = readInkRecords();
-    const QJsonObject r = rec >= 0 && rec < recs.size() ? recs[rec].toObject() : QJsonObject();
-    const QRectF sel = selectionRect(sc, layer);
-    const double k = sel.isEmpty() ? 1.0 : sel.width() / qMax(1.0, r.value(QStringLiteral("w")).toDouble(sel.width()));
-    const double em = r.value(QStringLiteral("em")).toDouble(60) * k;
-    const double maxW = qMax(sel.width() - r.value(QStringLiteral("ox")).toDouble() * k, em * 8);
-    QObject *o = createInline(eng, ctx, kEditQml, "InkEdit", dv,
-                              {{QStringLiteral("initial"), text}, {QStringLiteral("penManager"), QVariant::fromValue(mgr)},
-                               {QStringLiteral("weight"), weight}});
-    if (!o) { delete ctx; return; }
-    ctx->setParent(o);
-    g_edit = {o, sc, ph, dv, dv->property("currentPageId").toString(), rec, layer, em, maxW};
-    // rmpp-refresh does a full refresh once the keyboard has slid in; the edit box gets one only when it closes
-    // (finishInkEdit). rmpp-refresh 0.3.1+ reads this flag; older versions refresh anyway.
-    qApp->setProperty("rmppKeyboardRefresh", false);
-}
-
-// Called from the 1.5 s timer: the notebook was closed or the page turned while the edit box was open.
-void closeStaleInkEdit() {
-    if (!g_edit.box) return;
-    if (!g_edit.dv || !g_edit.dv->isVisible() || !g_edit.sc || g_edit.dv->property("currentPageId").toString() != g_edit.page)
-        closeInkEdit();
-}
-
-// Applies the edit; true when the ink is being redrawn (putInk).
-bool applyInkEdit(const InkEdit &e) {
-    if (!e.sc || !e.ph || !e.dv || e.dv->property("currentPageId").toString() != e.page) return false;
-    const QString text = g_state->value(QStringLiteral("inkText")).toString().trimmed();
-    const QJsonArray recs = readInkRecords();
-    if (e.rec < 0 || e.rec >= recs.size()) return false;
-    const QJsonObject r = recs[e.rec].toObject();
-    const int weight = qBound(0, g_state->value(QStringLiteral("inkWeight")).toInt(), 2);
-    const double size = qBound(50, g_state->value(QStringLiteral("inkSize")).toInt(), 200) / 100.0;
-    if (text == r.value(QStringLiteral("text")).toString() && weight == r.value(QStringLiteral("weight")).toInt(1)
-        && qFuzzyCompare(size, 1.0))
-        return false;   // nothing changed
-    // where the ink is now (it may have been moved since it was made)
-    const QRectF sel = selectionRect(e.sc, e.layer);
-    if (sel.isEmpty()) { setStatus(QStringLiteral("selection lost, select the ink again"), false); return false; }
-    // the ink may have been scaled since: k = its size now / when recorded
-    const double k = sel.width() / qMax(1.0, r.value(QStringLiteral("w")).toDouble());
-    const QPointF origin = sel.topLeft() + QPointF(r.value(QStringLiteral("ox")).toDouble(), r.value(QStringLiteral("oy")).toDouble()) * k;
-    // wrap only at the page's right edge (scene x = .rm x, centred: the page is -810..810), at least 8 em wide.
-    // Wrapping at the ink's own width broke lines that fitted before: a conversion sizes each line like its
-    // handwriting, the edit uses one size for all, and the width scaled with the size (2026-11-12).
-    const double em = r.value(QStringLiteral("em")).toDouble() * k * size;
-    const double maxW = qMax(810.0 - 40.0 - origin.x(), em * 8);
-    Placed pl = placeText(text, origin, em, maxW);
-    pl.weight = weight;
-    if (text.isEmpty()) {   // empty text: just delete the ink
-        QMetaObject::invokeMethod(e.sc, "deleteSelectedItems", Q_ARG(int, e.layer));
-        return false;
-    }
-    qWarning("[rmpp-hwr] ink edit: %s", qPrintable(QString(text).replace(QLatin1Char('\n'), QLatin1String(" | "))));
-    putInk(e.sc, e.ph, e.dv, e.layer, true, pl, text, e.rec, true);
-    return true;
-}
-
-void finishInkEdit(bool ok) {
-    const InkEdit e = g_edit;
-    closeInkEdit();
-    // one full refresh: putInk's after the edited ink is drawn, or here once the keyboard has slid out
-    if (!(ok && applyInkEdit(e))) fullRefreshLater(e.dv, 700);
-}
-
 const char *kBusyQml = R"QML(
 import QtQuick
 Rectangle {
@@ -679,8 +166,6 @@ void showInkBusy(QQuickItem *dv) {
     g_inkBusy = (eng && ctx) ? createInline(eng, ctx, kBusyQml, "InkBusy", dv) : nullptr;
 }
 
-// ---- the lasso menu button: edit our own ink, otherwise convert the selection ----
-// editOnly: from a double tap on the selection, which only opens the edit box for our own ink (never converts).
 // ---- typed text (lasso convert without Text object mode) ----
 // OS 3.29 keeps a page's typed text in one text column (the root document) that starts at the top of the page; it
 // cannot be placed at a free x/y. The recognized text goes to the line at the height of the selection, as
@@ -757,7 +242,7 @@ void putText(QPointer<QObject> scp, int layer, bool replace, const QList<QPair<d
 
 // Convert to text (toolbar) with "Replace the handwriting": select every stroke of the current layer, then convert
 // the selection to typed text in this page (deleting the strokes first), each line at its own height.
-void convertSelectionToInk(bool replace, bool editOnly, bool toText);
+void convertSelectionToInk(bool replace, bool toText = false);
 // A tap on an item through its window (emitting the tool's clicked() does not switch tools; a tap does, exp30).
 void tapItem(QQuickItem *item) {
     QQuickWindow *win = item ? item->window() : nullptr;
@@ -771,7 +256,7 @@ void tapItem(QQuickItem *item) {
 }
 
 void convertPageInPlace() {
-    if (g_state->value(QStringLiteral("busy")).toBool() || g_edit.box) return;
+    if (g_state->value(QStringLiteral("busy")).toBool()) return;
     QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
     QObject *sc = dv ? dv->property("sceneController").value<QObject *>() : nullptr;
     if (!sc) return;
@@ -793,45 +278,85 @@ void convertPageInPlace() {
                 if (!scp) return;
                 if (scp->property("selectionItemCount").toInt() <= 0) { setStatus(QStringLiteral("no handwriting on this page"), false); return; }
                 g_pageConvert = true;
-                convertSelectionToInk(true, false, true);
+                convertSelectionToInk(true, true);
                 g_pageConvert = false;
             });
         });
     });
 }
 
-// toText: typed text into the page's text column (see putText); otherwise a text object (ink).
-void convertSelectionToInk(bool replace, bool editOnly = false, bool toText = false) {
-    if (g_state->value(QStringLiteral("busy")).toBool() || g_edit.box) return;
-    if (editOnly && builtinRecognizer()) return;
+// The language of the recognition model in use ("ko", "zh", ...), rmpp-textobj's first place to look for glyphs.
+QString modelLanguageInUse() {
+    const QString dir = currentModelDir();
+    return dir.isEmpty() ? QString() : modelLanguage(dir, modelName(dir, QString()));
+}
+
+// "x0 y0 x1 y1<TAB>text" lines -> (vertical centre, text), as putText takes them.
+QList<QPair<double, QString>> centredLines(const QStringList &lines) {
+    QList<QPair<double, QString>> out;
+    for (const QString &l : lines) {
+        const QStringList b = l.section(QLatin1Char('\t'), 0, 0).split(QLatin1Char(' '));
+        const QString t = l.section(QLatin1Char('\t'), 1);
+        if (b.size() == 4 && !t.trimmed().isEmpty()) out.append({(b[1].toDouble() + b[3].toDouble()) / 2, t});
+    }
+    return out;
+}
+
+void recognizeAndPut(QPointer<QQuickItem> dvp, QPointer<QObject> scp, int layer, const QRectF &sel, bool replace,
+                     bool toText, const QStringList &objLines, bool pageConvert);
+
+// Lasso convert. toText: typed text into the page's text column (see putText); otherwise a text object (rmpp-textobj).
+// Text objects in the selection are not recognized again: only text objects -> their text is typed (toText) or the
+// edit box opens (text object); text objects and handwriting -> only the handwriting is recognized (the objects
+// are taken out of the selection first); typed text gets the objects' text too, in reading order.
+void convertSelectionToInk(bool replace, bool toText) {
+    if (g_state->value(QStringLiteral("busy")).toBool()) return;
     QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
     QObject *sc = dv ? dv->property("sceneController").value<QObject *>() : nullptr;
-    QObject *ph = dv ? dv->property("penHandler").value<QObject *>() : nullptr;
     QObject *doc = dv ? dv->property("document").value<QObject *>() : nullptr;
-    if (!sc || !ph || !doc) { setStatus(QStringLiteral("no open page"), false); return; }
+    if (!sc || !doc) { setStatus(QStringLiteral("no open page"), false); return; }
     const int layer = sc->property("currentLayer").toInt();
     const QRectF sel = selectionRect(sc, layer);
     if (sel.isEmpty()) { setStatus(QStringLiteral("select handwriting with the lasso first"), false); return; }
-    if (!toText && !loadGlyphs()) { setStatus(QStringLiteral("glyphs.json missing"), false); return; }
-    const QString pageId = dv->property("currentPageId").toString();
-    const QJsonArray recs = readInkRecords();
-    const int rec = findInkRecord(recs, pageId, sc->property("selectionItemCount").toInt(), sel);
-    if (rec >= 0) {
-        openInkEdit(dv, sc, ph, layer, rec, recs[rec].toObject().value(QStringLiteral("text")).toString(),
-                    recs[rec].toObject().value(QStringLiteral("weight")).toInt(1));
+    const TextObj to = textObj();
+    if (!toText && !to.ok()) { setStatus(QStringLiteral("text objects need rmpp-textobj"), false); return; }
+    QByteArray buf(64 * 1024, '\0');
+    const int kind = to.ok() ? to.selection(buf.data(), int(buf.size())) : 0;
+    const QStringList objLines = QString::fromUtf8(buf.constData()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    QPointer<QObject> scp(sc);
+    QPointer<QQuickItem> dvp(dv);
+    const bool pageConvert = g_pageConvert;   // set only during this call (convertPageInPlace)
+    if (kind == 1) {   // only text objects: their text, no recognition
+        if (!toText) { to.editSelection(); return; }
+        qWarning("[rmpp-hwr] text objects -> typed text (not recognized again)");
+        putText(scp, layer, replace, centredLines(objLines));
         return;
     }
-    if (editOnly) {
-        qWarning("[rmpp-hwr] double tap: not converted ink (%d strokes)", sc->property("selectionItemCount").toInt());
+    if (kind == 2) {   // text objects and handwriting: recognize the handwriting only
+        const int out = to.dropObjects();
+        qWarning("[rmpp-hwr] selection with text objects: %d of their strokes left out of recognition", out);
+        QTimer::singleShot(700, sc, [=] {
+            if (!scp || !dvp) return;
+            const QRectF rest = selectionRect(scp, layer);
+            if (rest.isEmpty()) { setStatus(QStringLiteral("only text objects selected"), false); return; }
+            recognizeAndPut(dvp, scp, layer, rest, replace, toText, objLines, pageConvert);
+        });
         return;
     }
+    recognizeAndPut(dvp, scp, layer, sel, replace, toText, {}, pageConvert);
+}
+
+void recognizeAndPut(QPointer<QQuickItem> dvp, QPointer<QObject> scp, int layer, const QRectF &sel, bool replace,
+                     bool toText, const QStringList &objLines, bool pageConvert) {
+    QObject *doc = dvp ? dvp->property("document").value<QObject *>() : nullptr;
+    if (!dvp || !scp || !doc) return;
+    const QString pageId = dvp->property("currentPageId").toString();
     const QImage img = selectionImage();
     if (img.isNull()) { setStatus(QStringLiteral("no selection image"), false); return; }
-    if (toText) g_convCtx = ConvCtx{doc->property("id").toString(), pageId, dv->property("currentPage").toInt(), img, g_pageConvert};
+    if (toText) g_convCtx = ConvCtx{doc->property("id").toString(), pageId, dvp->property("currentPage").toInt(), img, pageConvert};
     setStatus(QStringLiteral("Converting…"), true);
-    showInkBusy(dv);
-    QPointer<QObject> scp(sc), php(ph);
-    QPointer<QQuickItem> dvp(dv);
+    showInkBusy(dvp);
+    const QString lang = modelLanguageInUse();
     std::thread([=] {
         QString err;
         QList<InkLine> found;
@@ -841,8 +366,8 @@ void convertSelectionToInk(bool replace, bool editOnly = false, bool toText = fa
         }
         QMetaObject::invokeMethod(qApp, [=] {
             if (!err.isEmpty()) { setStatus(err, false); return; }
-            if (!scp || !php) { setStatus(QStringLiteral("page closed"), false); return; }
-            if (found.isEmpty()) { setStatus(QStringLiteral("no handwriting recognized in the selection"), false); return; }
+            if (!scp) { setStatus(QStringLiteral("page closed"), false); return; }
+            if (found.isEmpty() && objLines.isEmpty()) { setStatus(QStringLiteral("no handwriting recognized in the selection"), false); return; }
             // image pixels -> page units (the image covers the selection bounds)
             const double kx = sel.width() / img.width(), ky = sel.height() / img.height();
             QStringList lines, texts;
@@ -853,7 +378,7 @@ void convertSelectionToInk(bool replace, bool editOnly = false, bool toText = fa
                 texts << l.text;
             }
             if (toText) {
-                QList<QPair<double, QString>> typed;
+                QList<QPair<double, QString>> typed = centredLines(objLines);
                 for (const InkLine &l : found)
                     // skip empty lines and lone marks (a dot or dash recognized from a stray stroke)
                     if (!l.text.trimmed().isEmpty() && !(l.text.trimmed().size() == 1 && !l.text.trimmed().at(0).isLetterOrNumber()))
@@ -863,8 +388,13 @@ void convertSelectionToInk(bool replace, bool editOnly = false, bool toText = fa
                 putText(scp, layer, replace, typed);
                 return;
             }
+            if (lines.isEmpty()) { setStatus(QStringLiteral("no handwriting recognized in the selection"), false); return; }
             qWarning("[rmpp-hwr] ink: %s", qPrintable(texts.join(QLatin1String(" | "))));
-            putInk(scp, php, dvp, layer, replace, placeLines(lines, sel, replace), texts.join(QLatin1Char('\n')), -1);
+            const TextObj to = textObj();
+            const int r = to.ok() ? to.putLines(lines.join(QLatin1Char('\n')).toUtf8().constData(), sel.left(), sel.top(),
+                                                sel.right(), sel.bottom(), replace ? 1 : 0, lang.toUtf8().constData()) : -3;
+            setStatus(r == 1 ? QString() : r == -1 ? QStringLiteral("no glyphs for some characters (see the hint)")
+                      : r == -3 ? QStringLiteral("text objects need rmpp-textobj") : QStringLiteral("nothing to draw"), false);
         }, Qt::QueuedConnection);
     }).detach();
 }
