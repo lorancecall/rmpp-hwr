@@ -1,6 +1,6 @@
 # Developing rmpp-hwr
 
-Building and installing by hand: [install.md](install.md#building-and-installing-it-yourself-developers).
+Building and installing by hand: [install.md](install.md#build-and-install-by-hand).
 
 ## What is here
 

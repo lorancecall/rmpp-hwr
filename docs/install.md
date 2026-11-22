@@ -44,7 +44,7 @@ languages as `pack-*.tar`). The script is still in the repository and in the rel
 copy all assets of a release into one folder on the tablet and run `sh rmpp-install.sh` there. Packages are the
 way from 0.4 on; installing them moves the release install's files aside.
 
-## Building and installing it yourself (developers)
+## Build and install by hand
 
 Requirements: reMarkable Paper Pro with developer mode and SSH (an `ssh rmpp` alias with a key), OS 3.29, and
 `rmpp-preload` on the tablet. On the PC:
