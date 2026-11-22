@@ -45,16 +45,34 @@ Pitfall: a key named `model` in the add-on's QQmlPropertyMap (`hwr`) broke xochi
 ("Required property toolbar was not initialized" for every tool, loaders named `editingToolLoader_undefined`). The
 key is `hwrModel` now; avoid generic names (`model`, `index`, `modelData`) in maps exposed to QML.
 
-### My handwriting (2026-11-11)
+### My handwriting (removed 2026-11-11)
 
-`ink/own.py build` makes `glyphs_own.json` from the writer's collected strokes (personal data: built on the PC,
-copied only to the writer's tablet as `/home/root/.local/share/rmpp-hwr/glyphs_own.json`, never committed or
-released). Per character, best first: practice v2 cells; characters cut out of practice lines (words split into
-blobs by x overlap, a word used only when its blobs match its characters one to one, each cut-out kept only if the
-recognizer CLI reads it back as its label, look-alikes such as l/1 and o/0 allowed); Hangul composed from own
-syllables (initial+medial strokes of one, final consonant of another, e.g. 녕 = 념 without ㅁ + the ㅇ of 경);
-then the font. With the current data: 205 cells, 70 from lines, 513 composed, of 2,445. Settings > Handwriting
-"Ink handwriting" picks My handwriting or Font (shown when the file exists).
+A prototype drew the text object in the writer's own glyphs (`glyphs_own.json` built from collected strokes by
+`ink/own.py`). Removed in v0.3: the developer only needs the text object itself (an editable, movable ink object in
+a font), not handwriting-style output. The text object is drawn from `glyphs.json` (font centre lines).
+
+### Practice notebooks and saved conversions on the tablet (2026-11-12)
+
+xochitl's QML module `xofm.libs.library` has singletons usable from injected QML (`import xofm.libs.library as XL`;
+found with exp31, a walk of every reachable QObject, and exp32, a QML expression probe):
+`XL.LibraryController` (`createCollection(parent, name)`, `createDocument(parent, name)`,
+`createDocumentFromExisting(parent, name, srcDoc, [pages])`, `moveEntriesToTrash([ids])`, ...),
+`XL.DocumentController` (`copyPages(srcDoc, [page indices], dstDoc, at)`, `deletePages`, `movePages`, ...),
+`XL.DocumentImporter` (`importFromUrls([file urls], parentId)`, the drag-and-drop importer) and `XL.Library`
+(LibraryFacade: `entryForId(id)` -> entry wrapper with `pageCount`, `visibleName`, ...). Ids are passed as JS strings
+("" = My files), except lists of ids (`moveEntriesToTrash`), which need the `id` values of `entryForId(...)`. All of
+them work without restarting xochitl: an imported PDF is in the library at once (name = file name), copied pages
+keep their strokes (new page ids).
+
+- New practice notebook (`ui/practice.h`, `ui/practicenb.h`): `collect/pages.py` ported to C++ with Python's
+  random.Random reproduced (MT19937, init_by_array, `_randbelow`, `shuffle`, `choice`, `randint`), so the tablet's
+  sidecar for a seed equals the PC tool's; checked against `tests/golden/practice-{ko,en}-seed7.json`
+  (`ui/test/practice_test.cpp`, run on the tablet; `tests/test_practice_golden.py --tablet`). The PDF is drawn with
+  QPdfWriter at 229 dpi (page pixels as painter units), imported into `hwr-db/<lang>`, and the sidecar with `doc_id`,
+  `name`, `topics`, `source: "tablet"` goes to `practice/<doc_id>.json`.
+- Saved conversions (`ui/conversions.h`): after a conversion the page(s) are copied into
+  `hwr-db/<lang>/Conversions`; `conversions.jsonl` names the copies (`doc`, `src`, `dst`) and the originals
+  (`orig_*`), see the comment at the top of that file.
 
 ### Double tap
 
@@ -159,7 +177,8 @@ Converted text is drawn with the Fineliner (even width), black, thickness = em /
   developer loader: `echo "load /path/x.so ARG" > ~/.local/share/rmpp-hwr/cmd` dlopens an experiment and calls
   `rmpp_exp(ARG)` without restarting xochitl (`echo probe > .../cmd` dumps the meta-objects).
 - `ui/exp/*.cpp` + `ui/exp/build.sh`: the experiments (1 capture/dump Line, 2 add strokes, 3 selection signal,
-  4-7 selection + add, 8 lasso menu tree, 9 redraw).
+  4-7 selection + add, 8 lasso menu tree, 9 redraw, ..., 31 library API walk, 32 QML expression probe).
+- `ui/practice.h`, `ui/practicenb.h`, `ui/conversions.h`: practice notebooks and saved conversions (see above).
 - `src/lib.rs`: `rmpp_hwr_region(rec, path, x0, y0, x1, y1, out, len)`: recognize the strokes whose box centre is in
   the rectangle; output `x0 y0 x1 y1<TAB>text` per line.
 - Tablet: `glyphs.json` (release asset, installed by `rmpp-install.sh` / `hwr install`), `ink.json` (records) and

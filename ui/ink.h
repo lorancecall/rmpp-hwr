@@ -26,14 +26,9 @@ struct Glyph {
 QHash<QChar, Glyph> g_glyphs;
 
 // glyphs.json (ink/glyphs.py build): {"glyphs": {char: {"adv", "strokes": [[x, y, ...]]}}}, em units, y down.
-// Ink handwriting (Settings > Handwriting): "font" uses glyphs.json (release asset), "own" uses glyphs_own.json, the
-// writer's own characters built on the PC by ink/own.py and copied only to their tablet (personal data: never in the
-// repository or a release). Falls back to glyphs.json when glyphs_own.json is missing.
 QString g_glyphsFile;   // the file g_glyphs was loaded from
 
 QString glyphsFile() {
-    const QString own = QLatin1String(kLibDir) + QStringLiteral("/glyphs_own.json");
-    if (g_state->value(QStringLiteral("inkStyle")).toString() == QLatin1String("own") && QFileInfo::exists(own)) return own;
     return QLatin1String(kLibDir) + QStringLiteral("/glyphs.json");
 }
 
@@ -402,9 +397,22 @@ void recordInk(QPointer<QObject> scp, const QString &page, const QString &text, 
     });
 }
 
+// One full e-paper refresh (xochitl's own ghost buster, as rmpp-refresh does) after ms: the edit box and the
+// keyboard leave ghosting behind when they close.
+void fullRefreshLater(QPointer<QQuickItem> dvp, int ms) {
+    QTimer::singleShot(ms, qApp, [dvp] {
+        QObject *gb = dvp && dvp->isVisible() ? dvp->property("ghostBuster").value<QObject *>() : nullptr;
+        if (!gb || !QMetaObject::invokeMethod(gb, "userRequestedClear")) qWarning("[rmpp-hwr] no ghost buster");
+        else qWarning("[rmpp-hwr] full refresh");
+    });
+}
+
 // ---- adding ink: deselect/delete, add after the scene settles, select the new ink, redraw ----
+// The page is redrawn once: fullRefresh (after an edit: the box and the keyboard left ghosting) = one ghost-buster
+// refresh; otherwise one updateAfterStroke. Earlier versions redrew at 0, 300 and 1000 ms and the edit added a
+// full refresh on top: the developer saw the page flash several times (2026-11-22).
 void putInk(QPointer<QObject> scp, QPointer<QObject> php, QPointer<QQuickItem> dvp, int layer, bool deleteSelection,
-            const Placed &pl, const QString &text, int replaceIdx) {
+            const Placed &pl, const QString &text, int replaceIdx, bool fullRefresh = false) {
     // addDrawingLine is ignored while a selection is active
     if (deleteSelection) QMetaObject::invokeMethod(scp, "deleteSelectedItems", Q_ARG(int, layer));
     else QMetaObject::invokeMethod(scp, "clearSelectedItems");
@@ -415,10 +423,14 @@ void putInk(QPointer<QObject> scp, QPointer<QObject> php, QPointer<QQuickItem> d
             selectInk(scp, pl.strokes);
             recordInk(scp, dvp ? dvp->property("currentPageId").toString() : scp->property("pageId").toString(), text, pl, added, replaceIdx);
         }
-        // lines added this way are not drawn until the next redraw (updateAfterStroke is what the pen path calls);
-        // repeat once the lasso menu has closed, which repaints the old screen content
-        for (int ms : {0, 300, 1000})
-            QTimer::singleShot(ms, qApp, [dvp] { if (dvp) QMetaObject::invokeMethod(dvp, "updateAfterStroke"); });
+        // lines added this way are not drawn until the next redraw (updateAfterStroke is what the pen path calls).
+        // Once, after the new selection and its lasso menu have appeared (the menu repaints old screen content).
+        // After an edit the ghost-buster refresh follows right after it and clears the box's and keyboard's ghosting.
+        QTimer::singleShot(500, qApp, [dvp, fullRefresh] {
+            if (!dvp) return;
+            QMetaObject::invokeMethod(dvp, "updateAfterStroke");
+            if (fullRefresh) fullRefreshLater(dvp, 0);
+        });
         setStatus(added < 0 ? QStringLiteral("this xochitl version is not supported") : QString(), false);
     });
 }
@@ -567,6 +579,7 @@ public:
 void closeInkEdit() {
     if (g_edit.box) g_edit.box->deleteLater();
     g_edit.box = nullptr;
+    qApp->setProperty("rmppKeyboardRefresh", QVariant());
     if (QGuiApplication::inputMethod()) QGuiApplication::inputMethod()->hide();
 }
 
@@ -594,6 +607,9 @@ void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, c
     if (!o) { delete ctx; return; }
     ctx->setParent(o);
     g_edit = {o, sc, ph, dv, dv->property("currentPageId").toString(), rec, layer, em, maxW};
+    // rmpp-refresh does a full refresh once the keyboard has slid in; the edit box gets one only when it closes
+    // (finishInkEdit). rmpp-refresh 0.3.1+ reads this flag; older versions refresh anyway.
+    qApp->setProperty("rmppKeyboardRefresh", false);
 }
 
 // Called from the 1.5 s timer: the notebook was closed or the page turned while the edit box was open.
@@ -603,36 +619,45 @@ void closeStaleInkEdit() {
         closeInkEdit();
 }
 
-void finishInkEdit(bool ok) {
-    const InkEdit e = g_edit;
-    closeInkEdit();
-    if (!ok || !e.sc || !e.ph || !e.dv || e.dv->property("currentPageId").toString() != e.page) return;
+// Applies the edit; true when the ink is being redrawn (putInk).
+bool applyInkEdit(const InkEdit &e) {
+    if (!e.sc || !e.ph || !e.dv || e.dv->property("currentPageId").toString() != e.page) return false;
     const QString text = g_state->value(QStringLiteral("inkText")).toString().trimmed();
     const QJsonArray recs = readInkRecords();
-    if (e.rec < 0 || e.rec >= recs.size()) return;
+    if (e.rec < 0 || e.rec >= recs.size()) return false;
     const QJsonObject r = recs[e.rec].toObject();
     const int weight = qBound(0, g_state->value(QStringLiteral("inkWeight")).toInt(), 2);
     const double size = qBound(50, g_state->value(QStringLiteral("inkSize")).toInt(), 200) / 100.0;
     if (text == r.value(QStringLiteral("text")).toString() && weight == r.value(QStringLiteral("weight")).toInt(1)
         && qFuzzyCompare(size, 1.0))
-        return;   // nothing changed
+        return false;   // nothing changed
     // where the ink is now (it may have been moved since it was made)
     const QRectF sel = selectionRect(e.sc, e.layer);
-    if (sel.isEmpty()) { setStatus(QStringLiteral("selection lost, select the ink again"), false); return; }
+    if (sel.isEmpty()) { setStatus(QStringLiteral("selection lost, select the ink again"), false); return false; }
     // the ink may have been scaled since: k = its size now / when recorded
     const double k = sel.width() / qMax(1.0, r.value(QStringLiteral("w")).toDouble());
     const QPointF origin = sel.topLeft() + QPointF(r.value(QStringLiteral("ox")).toDouble(), r.value(QStringLiteral("oy")).toDouble()) * k;
-    // wrap at the width of the ink being edited (at least 8 em), so longer text grows downwards
+    // wrap only at the page's right edge (scene x = .rm x, centred: the page is -810..810), at least 8 em wide.
+    // Wrapping at the ink's own width broke lines that fitted before: a conversion sizes each line like its
+    // handwriting, the edit uses one size for all, and the width scaled with the size (2026-11-12).
     const double em = r.value(QStringLiteral("em")).toDouble() * k * size;
-    const double maxW = qMax((sel.width() - r.value(QStringLiteral("ox")).toDouble() * k) * size, em * 8);
+    const double maxW = qMax(810.0 - 40.0 - origin.x(), em * 8);
     Placed pl = placeText(text, origin, em, maxW);
     pl.weight = weight;
     if (text.isEmpty()) {   // empty text: just delete the ink
         QMetaObject::invokeMethod(e.sc, "deleteSelectedItems", Q_ARG(int, e.layer));
-        return;
+        return false;
     }
     qWarning("[rmpp-hwr] ink edit: %s", qPrintable(QString(text).replace(QLatin1Char('\n'), QLatin1String(" | "))));
-    putInk(e.sc, e.ph, e.dv, e.layer, true, pl, text, e.rec);
+    putInk(e.sc, e.ph, e.dv, e.layer, true, pl, text, e.rec, true);
+    return true;
+}
+
+void finishInkEdit(bool ok) {
+    const InkEdit e = g_edit;
+    closeInkEdit();
+    // one full refresh: putInk's after the edited ink is drawn, or here once the keyboard has slid out
+    if (!(ok && applyInkEdit(e))) fullRefreshLater(e.dv, 700);
 }
 
 const char *kBusyQml = R"QML(
@@ -656,9 +681,129 @@ void showInkBusy(QQuickItem *dv) {
 
 // ---- the lasso menu button: edit our own ink, otherwise convert the selection ----
 // editOnly: from a double tap on the selection, which only opens the edit box for our own ink (never converts).
-void convertSelectionToInk(bool replace, bool editOnly = false) {
+// ---- typed text (lasso convert without Text object mode) ----
+// OS 3.29 keeps a page's typed text in one text column (the root document) that starts at the top of the page; it
+// cannot be placed at a free x/y. The recognized text goes to the line at the height of the selection, as
+// reMarkable's own lasso convert does: below the existing text with blank lines up to that height, or, when the
+// text already reaches that height, at the end of the line there. Measured on 3.29: line pitch 53.55 for the default
+// paragraph style. Strokes below the text column are anchored to it, so inserted lines push them down (as typing
+// does): kept handwriting ends up just below its text, and so does all handwriting further down the page. Moving
+// them back failed (moveSelectedItems after addSelectionRect does nothing; clone + delete + cloneAddAndSelectItems
+// only deletes), see exp28/exp29. Inserting text ends the lasso selection, so with replace the
+// handwriting is deleted first (one undo step each).
+constexpr double kTextLinePitch = 53.55;
+
+// Selects the strokes inside a scene rect (SceneController::addSelectionRect, mode 0); false if not available.
+// Only works while the selection tool is active (tested: with the pen active it selects nothing).
+bool selectRect(QObject *sc, const QRect &r) {
+    const int m = sc->metaObject()->indexOfMethod("addSelectionRect(QRect,SceneController::LineSelectionMode)");
+    if (m < 0) return false;
+    QRect rect = r;
+    int mode = 0;
+    void *a[] = {nullptr, &rect, &mode};
+    sc->qt_metacall(QMetaObject::InvokeMetaMethod, m, a);
+    return true;
+}
+
+// The conversion being typed (for Save conversions): document, page index and id, the recognized ink.
+struct ConvCtx { QString doc, pageId; int page = -1; QImage img; bool pageReplace = false; };
+ConvCtx g_convCtx;
+bool g_pageConvert = false;   // set by convertPageInPlace for the conversion it starts
+
+// lines: each recognized line with its vertical centre (scene units), top to bottom.
+void putText(QPointer<QObject> scp, int layer, bool replace, const QList<QPair<double, QString>> &lines) {
+    if (replace) QMetaObject::invokeMethod(scp, "deleteSelectedItems", Q_ARG(int, layer));
+    else QMetaObject::invokeMethod(scp, "clearSelectedItems");
+    if (!scp->property("hasRootDocument").toBool()) QMetaObject::invokeMethod(scp, "createRootDocument");
+    // the root document's properties update asynchronously
+    QTimer::singleShot(300, scp, [=] {
+        if (!scp) { setStatus(QStringLiteral("page closed"), false); return; }
+        const QRectF root = scp->property("rootDocumentBoundingRect").toRectF();
+        const int len = scp->property("rootDocumentLength").toInt();
+        auto lineOf = [&](double y) { return qMax(0, int((y - root.top()) / kTextLinePitch)); };
+        const double y = lines.first().first;   // middle of the first written line
+        QString insert;
+        if (len > 0 && y < root.bottom()) {
+            QMetaObject::invokeMethod(scp, "setCursorPosition", Q_ARG(QPointF, QPointF(root.right() - 1, y)));
+            insert = (len > 1 ? QStringLiteral(" ") : QString()) + lines.first().second;   // no space on an empty line
+        } else {
+            const int used = len > 0 ? qMax(1, qRound(root.height() / kTextLinePitch)) : 0;   // lines in use
+            const int target = lineOf(y);                                                        // line of the handwriting
+            const int newlines = used == 0 ? target : qMax(1, target - used + 1);
+            QMetaObject::invokeMethod(scp, "setCursorIndex", Q_ARG(int, len));
+            insert = QString(newlines, QLatin1Char('\n')) + lines.first().second;
+        }
+        // the next lines at their own heights (at least one line apart)
+        for (int i = 1; i < lines.size(); ++i)
+            insert += QString(qMax(1, lineOf(lines[i].first) - lineOf(lines[i - 1].first)), QLatin1Char('\n')) + lines[i].second;
+        QStringList texts;
+        for (const auto &l : lines) texts << l.second;
+        const QString text = texts.join(QLatin1String(" | "));
+        QMetaObject::invokeMethod(scp, "replaceText", Q_ARG(QString, insert));
+        QTimer::singleShot(300, scp, [=] {
+            if (!scp) return;
+            const bool in = scp->property("rootDocumentLength").toInt() > len;
+            qWarning("[rmpp-hwr] text: %s (%s)", qPrintable(text),
+                     in ? "inserted" : "NOT inserted");
+            if (in && g_convCtx.page >= 0)
+                collectConversion(g_convCtx.doc, {g_convCtx.page}, g_convCtx.pageId, g_convCtx.pageId, texts,
+                                  saveInkImage(g_convCtx.img),
+                                  g_convCtx.pageReplace ? QStringLiteral("page-replace") : replace ? QStringLiteral("lasso-replace") : QStringLiteral("lasso"));
+            g_convCtx = ConvCtx();
+            setStatus(in ? QString() : QStringLiteral("the text could not be inserted (undo brings the handwriting back)"), false);
+        });
+    });
+}
+
+// Convert to text (toolbar) with "Replace the handwriting": select every stroke of the current layer, then convert
+// the selection to typed text in this page (deleting the strokes first), each line at its own height.
+void convertSelectionToInk(bool replace, bool editOnly, bool toText);
+// A tap on an item through its window (emitting the tool's clicked() does not switch tools; a tap does, exp30).
+void tapItem(QQuickItem *item) {
+    QQuickWindow *win = item ? item->window() : nullptr;
+    if (!win) return;
+    const QPointF c(item->width() / 2, item->height() / 2);
+    const QPointF p = item->mapToScene(c), g = item->mapToGlobal(c);
+    QMouseEvent press(QEvent::MouseButtonPress, p, p, g, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, p, p, g, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(win, &press);
+    QCoreApplication::sendEvent(win, &release);
+}
+
+void convertPageInPlace() {
     if (g_state->value(QStringLiteral("busy")).toBool() || g_edit.box) return;
-    if (editOnly && (!g_state->value(QStringLiteral("lassoInk")).toBool() || builtinRecognizer())) return;
+    QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
+    QObject *sc = dv ? dv->property("sceneController").value<QObject *>() : nullptr;
+    if (!sc) return;
+    // close the toolbar menu the button sits in, then make the selection tool active (rect selection needs it)
+    if (QQuickItem *sv = findItem(dv, [](QQuickItem *i) { return i->metaObject()->indexOfSignal("closeToolbarFoldout()") >= 0; }))
+        QMetaObject::invokeMethod(sv, "closeToolbarFoldout");
+    QPointer<QObject> scp(sc);
+    QTimer::singleShot(400, sc, [scp] {
+        QQuickItem *tool = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionButton"); });
+        if (tool && !tool->property("selected").toBool()) tapItem(tool);
+        QTimer::singleShot(600, scp, [scp] {
+            if (!scp) return;
+            QMetaObject::invokeMethod(scp, "clearSelectedItems");
+            if (!selectRect(scp, QRect(-5000, -5000, 10000, 40000))) {   // scene units: more than any page
+                setStatus(QStringLiteral("this xochitl version is not supported"), false);
+                return;
+            }
+            QTimer::singleShot(500, scp, [scp] {
+                if (!scp) return;
+                if (scp->property("selectionItemCount").toInt() <= 0) { setStatus(QStringLiteral("no handwriting on this page"), false); return; }
+                g_pageConvert = true;
+                convertSelectionToInk(true, false, true);
+                g_pageConvert = false;
+            });
+        });
+    });
+}
+
+// toText: typed text into the page's text column (see putText); otherwise a text object (ink).
+void convertSelectionToInk(bool replace, bool editOnly = false, bool toText = false) {
+    if (g_state->value(QStringLiteral("busy")).toBool() || g_edit.box) return;
+    if (editOnly && builtinRecognizer()) return;
     QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
     QObject *sc = dv ? dv->property("sceneController").value<QObject *>() : nullptr;
     QObject *ph = dv ? dv->property("penHandler").value<QObject *>() : nullptr;
@@ -667,7 +812,7 @@ void convertSelectionToInk(bool replace, bool editOnly = false) {
     const int layer = sc->property("currentLayer").toInt();
     const QRectF sel = selectionRect(sc, layer);
     if (sel.isEmpty()) { setStatus(QStringLiteral("select handwriting with the lasso first"), false); return; }
-    if (!loadGlyphs()) { setStatus(QStringLiteral("glyphs.json missing"), false); return; }
+    if (!toText && !loadGlyphs()) { setStatus(QStringLiteral("glyphs.json missing"), false); return; }
     const QString pageId = dv->property("currentPageId").toString();
     const QJsonArray recs = readInkRecords();
     const int rec = findInkRecord(recs, pageId, sc->property("selectionItemCount").toInt(), sel);
@@ -682,6 +827,7 @@ void convertSelectionToInk(bool replace, bool editOnly = false) {
     }
     const QImage img = selectionImage();
     if (img.isNull()) { setStatus(QStringLiteral("no selection image"), false); return; }
+    if (toText) g_convCtx = ConvCtx{doc->property("id").toString(), pageId, dv->property("currentPage").toInt(), img, g_pageConvert};
     setStatus(QStringLiteral("Converting…"), true);
     showInkBusy(dv);
     QPointer<QObject> scp(sc), php(ph);
@@ -705,6 +851,17 @@ void convertSelectionToInk(bool replace, bool editOnly = false) {
                 const QRectF b(sel.left() + l.box.left() * kx, sel.top() + l.box.top() * ky, l.box.width() * kx, l.box.height() * ky);
                 lines << QStringLiteral("%1 %2 %3 %4\t%5").arg(b.left()).arg(b.top()).arg(b.right()).arg(b.bottom()).arg(l.text);
                 texts << l.text;
+            }
+            if (toText) {
+                QList<QPair<double, QString>> typed;
+                for (const InkLine &l : found)
+                    // skip empty lines and lone marks (a dot or dash recognized from a stray stroke)
+                    if (!l.text.trimmed().isEmpty() && !(l.text.trimmed().size() == 1 && !l.text.trimmed().at(0).isLetterOrNumber()))
+                        typed.append({sel.top() + l.box.center().y() * ky, l.text});
+                if (typed.isEmpty()) { setStatus(QStringLiteral("no handwriting recognized in the selection"), false); return; }
+                std::sort(typed.begin(), typed.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+                putText(scp, layer, replace, typed);
+                return;
             }
             qWarning("[rmpp-hwr] ink: %s", qPrintable(texts.join(QLatin1String(" | "))));
             putInk(scp, php, dvp, layer, replace, placeLines(lines, sel, replace), texts.join(QLatin1Char('\n')), -1);

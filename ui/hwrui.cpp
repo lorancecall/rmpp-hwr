@@ -5,7 +5,10 @@
 #include <dlfcn.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <memory>
+#include <vector>
 #include <functional>
 #include <thread>
 
@@ -36,6 +39,7 @@
 #include <QtQml/QQmlEngine>
 #include <QtQml/QQmlPropertyMap>
 #include <QtGui/QPainter>
+#include <QtGui/QPdfWriter>
 #include <QtQuick/QQuickImageProvider>
 #include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickWindow>
@@ -47,7 +51,7 @@ const char *kPages = "/home/root/.local/share/remarkable/xochitl";
 
 const char *kConf = "/home/root/.config/rmpp-hwr/settings.conf";
 
-// busy, status, command (written by QML), settings hideNative / collect / lassoInk, info modelName / modelInfo / conversions
+// busy, status, command (written by QML), settings converter / collect / hwrModel, info modelName / conversions
 QQmlPropertyMap *g_state = nullptr;
 bool g_confLoaded = false;
 
@@ -57,11 +61,23 @@ void loadSettings() {
     if (g_confLoaded || !QFileInfo::exists(QStringLiteral("/home/root/.local"))) return;
     g_confLoaded = true;
     QSettings s(QLatin1String(kConf), QSettings::IniFormat);
-    g_state->insert(QStringLiteral("hideNative"), s.value(QStringLiteral("hideNative"), false).toBool());
-    g_state->insert(QStringLiteral("lassoInk"), s.value(QStringLiteral("lassoInk"), true).toBool());
-    g_state->insert(QStringLiteral("inkStyle"), s.value(QStringLiteral("inkStyle"), QStringLiteral("own")).toString());
-    g_state->insert(QStringLiteral("collect"), s.value(QStringLiteral("collect"), true).toBool());
-    g_state->insert(QStringLiteral("hwrModel"), s.value(QStringLiteral("model"), QStringLiteral("deployed")).toString());
+    // converter: "rmpp" (rmpp-hwr replaces reMarkable's Convert to text) or "remarkable" (rmpp-hwr changes nothing).
+    // Older settings: model=builtin meant reMarkable's converter.
+    // A fresh install starts with reMarkable's converter; settings from v0.2 (a model other than builtin) keep rmpp-hwr.
+    QString conv = s.value(QStringLiteral("converter")).toString();
+    if (conv.isEmpty()) conv = s.contains(QStringLiteral("model")) && s.value(QStringLiteral("model")).toString() != QLatin1String("builtin")
+        ? QStringLiteral("rmpp") : QStringLiteral("remarkable");
+    g_state->insert(QStringLiteral("converter"), conv);
+    // Save conversions (copies converted pages into hwr-db/<lang>/Conversions): off until turned on
+    g_state->insert(QStringLiteral("collect"), s.value(QStringLiteral("collect"), false).toBool());
+    // Lasso convert: typed text (default) or a text object (ink in the language's font; v0.2's lassoInk=true).
+    g_state->insert(QStringLiteral("textObject"), s.value(QStringLiteral("textObject"), s.value(QStringLiteral("lassoInk"), false)).toBool());
+    g_state->insert(QStringLiteral("lassoReplace"), s.value(QStringLiteral("lassoReplace"), false).toBool());
+    // Convert to text (toolbar): on a new page after this one (default: reMarkable's own convert does that, checked
+    // 2026-11-11) or into this page, replacing the ink
+    g_state->insert(QStringLiteral("pageReplace"), s.value(QStringLiteral("pageReplace"), false).toBool());
+    const QString model = s.value(QStringLiteral("model"), QStringLiteral("deployed")).toString();
+    g_state->insert(QStringLiteral("hwrModel"), model == QLatin1String("builtin") ? QStringLiteral("deployed") : model);
 }
 
 void saveSetting(const QString &key, const QVariant &v) {
@@ -103,7 +119,8 @@ bool loadLib(QString *err) {
 
 // ---- models (Settings > Handwriting > Recognition) ----
 // "deployed": rec.onnx / dict.txt / model.txt in kLibDir (what `hwr deploy` and the installer write);
-// models/<folder>/ with the same three files: more models to pick from; "builtin": rmpp-hwr's recognizer is off and
+// models/<folder>/ with the same three files: more models to pick from (grouped by language). With the converter set to
+// "remarkable" the recognizer is off and
 // reMarkable's own recognizer is used. A model is named by the first line of its model.txt (else its folder).
 QString modelName(const QString &dir, const QString &fallback) {
     QFile f(dir + QStringLiteral("/model.txt"));
@@ -115,6 +132,35 @@ QString modelName(const QString &dir, const QString &fallback) {
 }
 
 struct ModelEntry { QString id, name, dir; };
+
+// Language of a model: pack.json {"language": "ko"} in its folder, else guessed from its name.
+QString modelLanguage(const QString &dir, const QString &name) {
+    QFile f(dir + QStringLiteral("/pack.json"));
+    if (f.open(QIODevice::ReadOnly)) {
+        const QString l = QJsonDocument::fromJson(f.readAll()).object().value(QStringLiteral("language")).toString();
+        if (!l.isEmpty()) return l;
+    }
+    const QString n = name.toLower();
+    if (n.contains(QLatin1String("korean")) || n.contains(QLatin1String("-ko"))) return QStringLiteral("ko");
+    if (n.contains(QLatin1String("english")) || n.contains(QLatin1String("-en"))) return QStringLiteral("en");
+    if (n.contains(QLatin1String("japan"))) return QStringLiteral("ja");
+    if (n.contains(QLatin1String("chinese"))) return QStringLiteral("zh");
+    if (n.contains(QLatin1String("latin"))) return QStringLiteral("latin");
+    return QStringLiteral("other");
+}
+
+QString languageName(const QString &code) {
+    static const QHash<QString, QString> names{{QStringLiteral("ko"), QStringLiteral("Korean (with English and digits)")},
+        {QStringLiteral("en"), QStringLiteral("English")}, {QStringLiteral("ja"), QStringLiteral("Japanese")},
+        {QStringLiteral("zh"), QStringLiteral("Chinese")}, {QStringLiteral("latin"), QStringLiteral("Latin languages")}};
+    return names.value(code, QStringLiteral("Other"));
+}
+
+// Language rows: English first (the default language, as in rmpp-hwr-db), then by code, "other" last.
+bool languageBefore(const QString &a, const QString &b) {
+    auto rank = [](const QString &c) { return c == QLatin1String("en") ? 0 : c == QLatin1String("other") ? 2 : 1; };
+    return rank(a) != rank(b) ? rank(a) < rank(b) : a < b;
+}
 
 QList<ModelEntry> listModels() {
     QList<ModelEntry> out;
@@ -137,14 +183,14 @@ QList<ModelEntry> listModels() {
 
 // The model directory to use now ("" = builtin). A selected model that is gone falls back to the deployed one.
 QString currentModelDir() {
+    if (g_state->value(QStringLiteral("converter")).toString() != QLatin1String("rmpp")) return QString();
     const QString sel = g_state->value(QStringLiteral("hwrModel")).toString();
-    if (sel == QLatin1String("builtin")) return QString();
     for (const ModelEntry &m : listModels())
         if (m.id == sel) return m.dir;
     return QLatin1String(kLibDir);
 }
 
-bool builtinRecognizer() { return g_state->value(QStringLiteral("hwrModel")).toString() == QLatin1String("builtin"); }
+bool builtinRecognizer() { return g_state->value(QStringLiteral("converter")).toString() != QLatin1String("rmpp"); }
 
 // Called on a worker thread while busy; a different model selected since the last load is loaded instead.
 bool loadRecognizer(QString *err) {
@@ -237,21 +283,34 @@ QPair<QString, int> docPage(const QString &doc, const QString &page) {
 }
 
 void refreshInfo() {
-    QJsonArray models;
-    for (const ModelEntry &e : listModels()) {
-        QFileInfo f(e.dir + QStringLiteral("/rec.onnx"));
-        models.append(QJsonObject{{QStringLiteral("id"), e.id}, {QStringLiteral("name"), e.name},
-                                  {QStringLiteral("info"), QStringLiteral("%1 MB, %2").arg(f.size() / 1048576.0, 0, 'f', 1)
-                                      .arg(f.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm")))
-                                      + (e.id == QLatin1String("deployed") ? QStringLiteral(", deployed") : QString())}});
-    }
-    g_state->insert(QStringLiteral("hasOwnGlyphs"), QFileInfo::exists(QLatin1String(kLibDir) + QStringLiteral("/glyphs_own.json")));
-    g_state->insert(QStringLiteral("modelList"), QString::fromUtf8(QJsonDocument(models).toJson(QJsonDocument::Compact)));
     // the model in use (id as resolved: a vanished selection shows as the deployed one)
+    const QList<ModelEntry> all = listModels();
     const QString cur = currentModelDir();
     QString curId = QStringLiteral("builtin");
-    for (const ModelEntry &e : listModels()) if (e.dir == cur) curId = e.id;
+    for (const ModelEntry &e : all) if (e.dir == cur) curId = e.id;
     g_state->insert(QStringLiteral("modelInUse"), curId);
+    // models grouped by language (Settings > Handwriting > Language)
+    QStringList order;
+    QHash<QString, QJsonArray> byLang;
+    QString curLang;
+    for (const ModelEntry &e : all) {
+        QFileInfo f(e.dir + QStringLiteral("/rec.onnx"));
+        const QString l = modelLanguage(e.dir, e.name);
+        if (!order.contains(l)) order << l;
+        if (e.id == curId) curLang = l;
+        byLang[l].append(QJsonObject{{QStringLiteral("id"), e.id}, {QStringLiteral("name"), e.name},
+                                     {QStringLiteral("info"), QStringLiteral("%1 MB, %2").arg(f.size() / 1048576.0, 0, 'f', 1)
+                                         .arg(f.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm")))
+                                         + (e.id == QLatin1String("deployed") ? QStringLiteral(", deployed") : QString())},
+                                     // the deployed files (installer / `hwr deploy`) are not deleted from the tablet
+                                     {QStringLiteral("deletable"), e.id != QLatin1String("deployed")}});
+    }
+    std::sort(order.begin(), order.end(), languageBefore);
+    QJsonArray langs;
+    for (const QString &l : order)
+        langs.append(QJsonObject{{QStringLiteral("code"), l}, {QStringLiteral("name"), languageName(l)}, {QStringLiteral("models"), byLang[l]}});
+    g_state->insert(QStringLiteral("languageList"), QString::fromUtf8(QJsonDocument(langs).toJson(QJsonDocument::Compact)));
+    g_state->insert(QStringLiteral("languageInUse"), curLang.isEmpty() ? QString() : languageName(curLang));
     const QString dir = cur.isEmpty() ? QLatin1String(kLibDir) : cur;
     QFileInfo m(dir + QStringLiteral("/rec.onnx"));
     const QString name = modelName(dir, QStringLiteral("rmpp-hwr-korean-base"));
@@ -326,6 +385,21 @@ void deleteConversions(const QString &time) {
     refreshInfo();
 }
 
+void setStatus(const QString &s, bool busy);
+
+// Delete an installed model (models/<id>/). Not the deployed files and not the model in use.
+void deleteModel(const QString &id) {
+    if (id.isEmpty() || id == QLatin1String("deployed") || id.contains(QLatin1Char('/')) || id.startsWith(QLatin1Char('.'))) return;
+    for (const ModelEntry &e : listModels()) {
+        if (e.id != id) continue;
+        if (e.dir == currentModelDir()) { setStatus(QStringLiteral("the model in use is not deleted"), false); return; }
+        if (g_hwr.rec && g_hwr.recDir == e.dir) return;   // still loaded (should not happen: it is not the one in use)
+        const bool ok = QDir(e.dir).removeRecursively();
+        qWarning("[rmpp-hwr] model %s %s", qPrintable(id), ok ? "deleted" : "could not be deleted");
+    }
+    refreshInfo();
+}
+
 // ---- item tree helpers ----
 QQuickItem *findItem(QQuickItem *root, const std::function<bool(QQuickItem *)> &pred, int depth = 0) {
     if (!root || depth > 250) return nullptr;
@@ -383,26 +457,11 @@ void typeText(const QStringList &lines) {
     setStatus(QString(), false);
 }
 
-// One JSON line per conversion: the handwritten source page (original), the recognized lines (converted) and
-// the page they were typed on, whose text the user may correct later (corrected). Collected over SSH for training.
-void logConversion(const QString &doc, const QString &src, const QString &dst, const QStringList &lines,
-                   const QString &ink) {
-    if (!g_state->value(QStringLiteral("collect")).toBool()) {
-        if (!ink.isEmpty()) QFile::remove(QLatin1String(kLibDir) + QLatin1Char('/') + ink);
-        return;
-    }
-    QDir().mkpath(QLatin1String(kLibDir));
-    QFile f(QStringLiteral("%1/conversions.jsonl").arg(QLatin1String(kLibDir)));
-    if (!f.open(QIODevice::Append | QIODevice::Text)) return;
-    const QString time = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
-    QJsonObject o{{QStringLiteral("time"), time},
-                  {QStringLiteral("doc"), doc}, {QStringLiteral("src"), src}, {QStringLiteral("dst"), dst},
-                  {QStringLiteral("lines"), QJsonArray::fromStringList(lines)}};
-    if (!ink.isEmpty()) o.insert(QStringLiteral("ink"), ink);
-    f.write(QJsonDocument(o).toJson(QJsonDocument::Compact) + '\n');
-    g_dstToTime[dst] = time;
-    g_dstDone[dst] = false;
-}
+// Saved conversions (conversions.h): the converted pages are copied into hwr-db/<lang>/Conversions and recorded in
+// conversions.jsonl. pages = 0-based indices of the pages to copy.
+void collectConversion(const QString &doc, const QList<int> &pages, const QString &src, const QString &dst,
+                       const QStringList &lines, const QString &ink, const QString &kind);
+QString saveInkImage(const QImage &img);
 
 // Toolbar state: is the open page a typed page made by Convert page, and is it marked corrected?
 void updateCurrentPage() {
@@ -430,11 +489,14 @@ void insertOnNextPage(QPointer<QQuickItem> dv, int fromPage, const QStringList &
             return;
         }
         timer->deleteLater();
-        if (QObject *d = dv->property("document").value<QObject *>())
-            logConversion(d->property("id").toString(), dv->property("_rmppHwrSrc").toString(),
-                          dv->property("currentPageId").toString(), lines, dv->property("_rmppHwrInk").toString());
+        const QString doc = dv->property("document").value<QObject *>() ? dv->property("document").value<QObject *>()->property("id").toString() : QString();
+        const QString src = dv->property("_rmppHwrSrc").toString(), dst = dv->property("currentPageId").toString();
+        const QString ink = dv->property("_rmppHwrInk").toString();
         QMetaObject::invokeMethod(dv, "enterTextMode", Q_ARG(QVariant, true), Q_ARG(QVariant, QVariant()));
-        QTimer::singleShot(400, dv, [lines] { typeText(lines); });
+        QTimer::singleShot(400, dv, [=] {
+            typeText(lines);
+            collectConversion(doc, {fromPage, fromPage + 1}, src, dst, lines, ink, QStringLiteral("page"));
+        });
     });
     timer->start(150);
 }
@@ -484,7 +546,7 @@ import xofm.libs.toolbar
 ToolbarTool {
     objectName: "rmppHwrButton"
     type: ToolbarTool.Type.FoldoutButton
-    shouldShow: toolbar.notePage && hwr.hwrModel !== "builtin"
+    shouldShow: toolbar.notePage && hwr.converter === "rmpp"
     label: hwr.busy ? "Converting…" : "Convert page"
     iconSource: "qrc:/ark/icons/hwc"
     onClicked: hwr.command = "page#" + Date.now()
@@ -495,7 +557,7 @@ ToolbarTool {
 // Hides the built-in tool while the setting is on; Binding restores xochitl's own binding when it is turned off.
 const char *kHideQml = R"QML(
 import QtQuick
-Binding { property: "visible"; value: false; when: !!hwr.hideNative }
+Binding { property: "visible"; value: false; when: hwr.converter === "rmpp" }
 )QML";
 
 const char *kSidebarQml = R"QML(
@@ -505,6 +567,7 @@ import ark.tokens as ArkTokens
 import ark.controls as ArkControls
 ArkControls.SidebarItem {
     objectName: "rmppHwrSidebarItem"
+    property int rmppOrder: 400   // Settings rail order shared by the rmpp add-ons (see railOrder)
     readonly property int hwrPage: 1001
     type: ArkTokens.Sidebar.primary
     text: settingsRoot.showLabels ? "Handwriting" : ""
@@ -524,8 +587,45 @@ import ark.controls as ArkControls
 Rectangle {
     id: page
     readonly property int hwrPage: 1001
+    readonly property bool rmpp: hwr.converter === "rmpp"
+    // "" = main screen, "lang" = languages, "lang:<code>" = models of one language, "convert", "collect",
+    // "practice-new" = New practice notebook
+    property string sub: ""
+    property string newLang: ""
+    property var newTopics: []
+    property int newPages: 8
+    readonly property var practiceLangs: { try { return JSON.parse(hwr.practiceLangs || "[]"); } catch (e) { return []; } }
+    readonly property var practiceList: { try { return JSON.parse(hwr.practiceList || "[]"); } catch (e) { return []; } }
+    readonly property var newLangEntry: {
+        for (const l of practiceLangs) if (l.code === newLang) return l;
+        return practiceLangs.length ? practiceLangs[0] : null;
+    }
+    function startNew() {
+        const l = newLangEntry;
+        newLang = l ? l.code : "";
+        newTopics = l ? l.topics.map(t => t.id) : [];
+        go("practice-new");
+    }
+    function toggleTopic(id) {
+        const t = newTopics.slice();
+        const i = t.indexOf(id);
+        if (i >= 0) { if (t.length > 1) t.splice(i, 1); } else t.push(id);
+        newTopics = t;
+    }
     property string openTime: ""
+    property string confirmDelete: ""
+    readonly property var languages: { try { return JSON.parse(hwr.languageList || "[]"); } catch (e) { return []; } }
+    readonly property var langEntry: {
+        if (!sub.startsWith("lang:")) return null;
+        for (const l of languages) if (l.code === sub.slice(5)) return l;
+        return null;
+    }
     function send(c) { hwr.command = c + "#" + Date.now(); }
+    function go(s) { sub = s; confirmDelete = ""; openTime = ""; flick.contentY = 0; }
+    function modelInUseName() {
+        for (const l of languages) for (const m of l.models) if (m.id === hwr.modelInUse) return m.name;
+        return "";
+    }
     x: payloadLoaderRef.x
     y: payloadLoaderRef.y
     width: payloadLoaderRef.width
@@ -533,13 +633,15 @@ Rectangle {
     z: 10
     color: "white"
     visible: settingsRoot._selectedPage === hwrPage
-    onVisibleChanged: if (visible) send("refresh")
+    onVisibleChanged: { if (visible) send("refresh"); else go(""); }
+    onRmppChanged: if (!rmpp) go("")
 
     ArkControls.PlaceholderBar {
         id: placeholder
         anchors { top: parent.top; left: parent.left; right: parent.right }
     }
     Flickable {
+        id: flick
         anchors {
             top: placeholder.bottom; left: parent.left; right: parent.right; bottom: parent.bottom
             leftMargin: ArkControls.Values.margin.horizontal.large
@@ -553,71 +655,205 @@ Rectangle {
             width: parent.width
             spacing: ArkControls.Values.spacing.large
 
+            ArkControls.Button {
+                visible: page.sub !== ""
+                text: page.sub.startsWith("lang:") ? "‹  Language" : page.sub === "practice-new" ? "‹  Collect training data" : "‹  Handwriting"
+                type: ArkTokens.Button.secondary
+                onClicked: page.go(page.sub.startsWith("lang:") ? "lang" : page.sub === "practice-new" ? "collect" : "")
+            }
             ArkControls.Title {
                 type: ArkControls.Title.Large
-                text: "Handwriting settings"
+                text: page.sub === "" ? "Handwriting settings"
+                    : page.sub === "lang" ? "Language"
+                    : page.sub === "convert" ? "Convert"
+                    : page.sub === "collect" ? "Collect training data"
+                    : page.sub === "practice-new" ? "New practice notebook"
+                    : (page.langEntry ? page.langEntry.name : "Language")
                 Layout.fillWidth: true
             }
+
+            // ================= main screen =================
             ArkControls.Panel {
-                label: "Convert page"
-                description: "Recognizes Korean, English and numbers on the current page and types the text on a new page after it."
+                visible: page.sub === ""
+                label: "Handwriting converter"
+                description: "Choosing rmpp-hwr turns off reMarkable's Convert to text."
                 Layout.fillWidth: true
             }
-            ArkControls.Panel {
-                label: "Hide built-in Convert to text"
-                description: hwr.hideNative ? "Only Convert page is shown in the toolbar" : "Both Convert to text and Convert page are shown"
-                Layout.fillWidth: true
-                action: ArkControls.Toggle {
-                    checked: !!hwr.hideNative
-                    MouseArea {
-                        anchors.fill: parent
-                        anchors.margins: -20
-                        onClicked: page.send("set:hideNative:" + (hwr.hideNative ? "0" : "1"))
-                    }
+            RowLayout {
+                visible: page.sub === ""
+                spacing: ArkControls.Values.spacing.medium
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                ArkControls.Button {
+                    text: "reMarkable"
+                    type: page.rmpp ? ArkTokens.Button.secondary : ArkTokens.Button.primary
+                    onClicked: page.send("converter:remarkable")
+                }
+                ArkControls.Button {
+                    text: "rmpp-hwr"
+                    type: page.rmpp ? ArkTokens.Button.primary : ArkTokens.Button.secondary
+                    onClicked: page.send("converter:rmpp")
                 }
             }
-            ArkControls.Panel {
-                visible: !!hwr.hasOwnGlyphs
-                label: "Ink handwriting: " + (hwr.inkStyle === "own" ? "My handwriting" : "Font")
-                description: hwr.inkStyle === "own"
-                    ? "Convert to ink writes with your own characters (from your practice pages); missing ones come from the font."
-                    : "Convert to ink writes with the font (Noto Sans KR)."
-                Layout.fillWidth: true
-                action: ArkControls.Toggle {
-                    checked: hwr.inkStyle === "own"
-                    MouseArea {
-                        anchors.fill: parent
-                        anchors.margins: -20
-                        onClicked: page.send("style:" + (hwr.inkStyle === "own" ? "font" : "own"))
+            Repeater {
+                model: page.sub === "" && page.rmpp ? [
+                    { key: "lang", label: "Language",
+                      text: hwr.languageInUse ? hwr.languageInUse + ": " + page.modelInUseName() : "No model installed" },
+                    { key: "convert", label: "Convert",
+                      text: "Page: " + (hwr.pageReplace ? "into the page" : "on a new page") + ".  Lasso: " + (hwr.textObject ? "text object" : "typed text") + "." },
+                    { key: "collect", label: "Collect training data",
+                      text: "Save conversions: " + (hwr.collect ? "on" : "off") + ", " + (hwr.conversions || 0) + " saved." }
+                ] : []
+                delegate: ArkControls.Panel {
+                    required property var modelData
+                    label: modelData.label
+                    description: modelData.text
+                    Layout.fillWidth: true
+                    action: ArkControls.Button {
+                        text: "›"
+                        type: ArkTokens.Button.secondary
+                        onClicked: page.go(modelData.key)
                     }
+                    MouseArea { anchors.fill: parent; z: -1; onClicked: page.go(modelData.key) }
                 }
             }
+
+            // ================= Language › =================
             ArkControls.Panel {
-                label: "Lasso convert button: " + (hwr.lassoInk ? "Convert to ink" : "Convert to text (built-in)")
-                description: hwr.lassoInk
-                    ? "The convert button under a lasso selection writes the recognized text as ink you can move and resize. Double tap converted ink to edit its text."
-                    : "The convert button under a lasso selection uses reMarkable's own Convert to text."
+                visible: page.sub === "lang"
+                label: "Languages"
+                description: page.languages.length
+                    ? "The languages of the installed recognition models. Pick a language to choose its model."
+                    : "No recognition model is installed. Install rmpp-hwr again from your computer."
                 Layout.fillWidth: true
-                action: ArkControls.Toggle {
-                    checked: !!hwr.lassoInk
-                    MouseArea {
-                        anchors.fill: parent
-                        anchors.margins: -20
-                        onClicked: page.send("set:lassoInk:" + (hwr.lassoInk ? "0" : "1"))
+            }
+            Repeater {
+                model: page.sub === "lang" ? page.languages : []
+                delegate: ArkControls.Panel {
+                    required property var modelData
+                    readonly property bool inUse: modelData.models.some(m => m.id === hwr.modelInUse)
+                    label: modelData.name + (inUse ? "  (in use)" : "")
+                    description: modelData.models.length + (modelData.models.length === 1 ? " model" : " models")
+                    Layout.fillWidth: true
+                    action: ArkControls.Button {
+                        text: "›"
+                        type: ArkTokens.Button.secondary
+                        onClicked: page.go("lang:" + modelData.code)
+                    }
+                    MouseArea { anchors.fill: parent; z: -1; onClicked: page.go("lang:" + modelData.code) }
+                }
+            }
+
+            // ================= one language: its models =================
+            ArkControls.Panel {
+                visible: !!page.langEntry
+                label: "Models"
+                description: "Use picks the model for converting. Personal models are trained on your practice pages."
+                Layout.fillWidth: true
+            }
+            Repeater {
+                model: page.langEntry ? page.langEntry.models : []
+                delegate: ArkControls.Panel {
+                    id: mrow
+                    required property var modelData
+                    readonly property bool inUse: hwr.modelInUse === modelData.id
+                    label: modelData.name
+                    description: (modelData.info || "")
+                    Layout.fillWidth: true
+                    action: RowLayout {
+                        spacing: ArkControls.Values.spacing.medium
+                        ArkControls.Button {
+                            text: mrow.inUse ? "In use" : "Use"
+                            enabled: !mrow.inUse
+                            type: ArkTokens.Button.secondary
+                            onClicked: page.send("model:" + modelData.id)
+                        }
+                        ArkControls.Button {
+                            visible: !!modelData.deletable && !mrow.inUse
+                            text: page.confirmDelete === modelData.id ? "Tap again to delete" : "Delete"
+                            type: ArkTokens.Button.secondary
+                            onClicked: {
+                                if (page.confirmDelete === modelData.id) { page.send("delmodel:" + modelData.id); page.confirmDelete = ""; }
+                                else page.confirmDelete = modelData.id;
+                            }
+                        }
                     }
                 }
             }
 
-            ArkControls.Title {
-                type: ArkControls.Title.Medium
-                text: "Collect training data"
+            // ================= Convert › =================
+            ArkControls.Panel {
+                visible: page.sub === "convert"
+                label: "Convert to text (toolbar)"
+                description: hwr.pageReplace
+                    ? "Recognizes the whole page and types the text into this page, each line at the height of its handwriting; the handwriting is removed (undo brings it back)."
+                    : "Recognizes the whole page and types the text on a new page after it. Your handwriting stays as it is."
                 Layout.fillWidth: true
             }
             ArkControls.Panel {
+                visible: page.sub === "convert"
+                label: "Replace the handwriting"
+                description: hwr.pageReplace ? "The text goes into this page." : "The text goes on a new page."
+                Layout.fillWidth: true
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                action: ArkControls.Toggle {
+                    checked: !!hwr.pageReplace
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -20
+                        onClicked: page.send("set:pageReplace:" + (hwr.pageReplace ? "0" : "1"))
+                    }
+                }
+            }
+            ArkControls.Panel {
+                visible: page.sub === "convert"
+                label: "Lasso convert"
+                description: hwr.textObject
+                    ? "The convert button under a lasso selection writes the recognized text as a text object: ink in the language's font that you can move, resize and erase. Double tap it to edit its text, weight and size."
+                    : "The convert button under a lasso selection recognizes the handwriting and types the text into the page's text, on the line at the height of the handwriting."
+                Layout.fillWidth: true
+            }
+            ArkControls.Panel {
+                visible: page.sub === "convert"
+                label: "Text object mode"
+                description: "Write the result as an editable text object instead of typed text."
+                Layout.fillWidth: true
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                action: ArkControls.Toggle {
+                    checked: !!hwr.textObject
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -20
+                        onClicked: page.send("set:textObject:" + (hwr.textObject ? "0" : "1"))
+                    }
+                }
+            }
+            ArkControls.Panel {
+                visible: page.sub === "convert"
+                label: "Replace the handwriting"
+                description: hwr.lassoReplace
+                    ? (hwr.textObject ? "The handwriting is removed and the text object takes its place (undo brings it back)."
+                                      : "The handwriting is removed once the text is typed in (undo brings it back).")
+                    : (hwr.textObject ? "The handwriting stays; the text object is written below it."
+                                      : "The handwriting stays and moves down, below the typed text.")
+                Layout.fillWidth: true
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                action: ArkControls.Toggle {
+                    checked: !!hwr.lassoReplace
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -20
+                        onClicked: page.send("set:lassoReplace:" + (hwr.lassoReplace ? "0" : "1"))
+                    }
+                }
+            }
+
+            // ================= Collect training data › =================
+            ArkControls.Panel {
+                visible: page.sub === "collect"
                 label: "Save conversions: " + (hwr.collect ? "On" : "Off")
                 description: hwr.collect
-                    ? "Each Convert page keeps your handwriting and its text. Fix mistakes on the text page and the fixed text is used to train the model. Stays on this tablet."
-                    : "Nothing is saved. Convert page still works."
+                    ? "Each conversion is copied to the notebook hwr-db/<language>/Conversions. Fix mistakes in the text there and tap Done correcting; the fixed text is used to train the model. Stays on this tablet until you download it."
+                    : "Nothing is saved. Converting still works."
                 Layout.fillWidth: true
                 action: ArkControls.Toggle {
                     checked: !!hwr.collect
@@ -629,15 +865,112 @@ Rectangle {
                 }
             }
             ArkControls.Panel {
+                visible: page.sub === "collect"
                 label: "Practice notebooks"
-                description: "Notebooks named rmpp-practice have sentences to copy by hand, the fastest way to teach the model your writing. New ones are added from the computer."
+                description: "Sentences to copy by hand, the fastest way to teach the model your writing. New notebooks go to the folder hwr-db, by language."
                 Layout.fillWidth: true
+                action: ArkControls.Button {
+                    text: "New"
+                    type: ArkTokens.Button.secondary
+                    enabled: page.practiceLangs.length > 0
+                    onClicked: page.startNew()
+                }
+            }
+            ArkControls.Panel {
+                visible: (page.sub === "collect" || page.sub === "practice-new") && !!hwr.practiceStatus
+                label: hwr.practiceStatus || ""
+                Layout.fillWidth: true
+            }
+            Repeater {
+                model: page.sub === "collect" ? page.practiceList : []
+                delegate: ArkControls.Panel {
+                    required property var modelData
+                    label: modelData.name
+                    description: modelData.lang + "  ·  " + (modelData.written >= modelData.pages
+                        ? "Done: all " + modelData.pages + " pages written"
+                        : modelData.written + " of " + modelData.pages + " pages written")
+                    Layout.fillWidth: true
+                    Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                }
+            }
+
+            // ================= New practice notebook =================
+            ArkControls.Panel {
+                visible: page.sub === "practice-new"
+                label: "Language"
+                description: "Each notebook practises one language, with English and digits."
+                Layout.fillWidth: true
+            }
+            Flow {
+                visible: page.sub === "practice-new"
+                spacing: ArkControls.Values.spacing.medium
+                Layout.fillWidth: true
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                Repeater {
+                    model: page.sub === "practice-new" ? page.practiceLangs : []
+                    delegate: ArkControls.Button {
+                        required property var modelData
+                        text: modelData.name
+                        type: page.newLangEntry && page.newLangEntry.code === modelData.code ? ArkTokens.Button.primary : ArkTokens.Button.secondary
+                        onClicked: { page.newLang = modelData.code; page.newTopics = modelData.topics.map(t => t.id); }
+                    }
+                }
+            }
+            ArkControls.Panel {
+                visible: page.sub === "practice-new"
+                label: "Topics"
+                description: "Where the sentences come from. At least one."
+                Layout.fillWidth: true
+            }
+            Flow {
+                visible: page.sub === "practice-new"
+                spacing: ArkControls.Values.spacing.medium
+                Layout.fillWidth: true
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                Repeater {
+                    model: page.sub === "practice-new" && page.newLangEntry ? page.newLangEntry.topics : []
+                    delegate: ArkControls.Button {
+                        required property var modelData
+                        text: modelData.name
+                        type: page.newTopics.indexOf(modelData.id) >= 0 ? ArkTokens.Button.primary : ArkTokens.Button.secondary
+                        onClicked: page.toggleTopic(modelData.id)
+                    }
+                }
+            }
+            ArkControls.Panel {
+                visible: page.sub === "practice-new"
+                label: "Pages"
+                description: "About 10 minutes of writing per page."
+                Layout.fillWidth: true
+            }
+            RowLayout {
+                visible: page.sub === "practice-new"
+                spacing: ArkControls.Values.spacing.medium
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                Repeater {
+                    model: page.sub === "practice-new" ? [4, 8, 16] : []
+                    delegate: ArkControls.Button {
+                        required property var modelData
+                        text: String(modelData)
+                        type: page.newPages === modelData ? ArkTokens.Button.primary : ArkTokens.Button.secondary
+                        onClicked: page.newPages = modelData
+                    }
+                }
+            }
+            ArkControls.Button {
+                visible: page.sub === "practice-new"
+                text: hwr.practiceBusy ? "Adding…" : "Create notebook"
+                type: ArkTokens.Button.primary
+                enabled: !hwr.practiceBusy && !!page.newLangEntry && page.newTopics.length > 0
+                Layout.leftMargin: ArkControls.Values.margin.horizontal.large
+                onClicked: page.send("practice:new:" + page.newLangEntry.code + ":" + page.newTopics.join(",") + ":" + page.newPages)
             }
             ArkControls.Panel {
                 id: savedPanel
+                visible: page.sub === "collect"
                 property bool confirm: false
                 label: "Saved conversions: " + (hwr.conversions || 0) + " (" + (hwr.correctedCount || 0) + " corrected)"
-                description: "Each one is a handwritten page and the typed page after it. Fix the typed page, then tap Done correcting (in the Convert menu or here). Only corrected ones are used for training; later edits are picked up too. Deleting keeps the notebook pages."
+                description: "Each one is a page in hwr-db/<language>/Conversions. Fix its text, then tap Done correcting (in the toolbar or here). Only corrected ones are used for training; later edits are picked up too. Deleting keeps the notebook pages."
                 Layout.fillWidth: true
                 action: ArkControls.Button {
                     visible: (hwr.conversions || 0) > 0
@@ -650,7 +983,7 @@ Rectangle {
                 }
             }
             Repeater {
-                model: { try { return JSON.parse(hwr.items || "[]").slice(0, 30); } catch (e) { return []; } }
+                model: { if (page.sub !== "collect") return []; try { return JSON.parse(hwr.items || "[]").slice(0, 30); } catch (e) { return []; } }
                 delegate: ColumnLayout {
                     id: rec
                     required property var modelData
@@ -701,35 +1034,6 @@ Rectangle {
                     }
                 }
             }
-
-            ArkControls.Title {
-                type: ArkControls.Title.Medium
-                text: "Model"
-                Layout.fillWidth: true
-            }
-            ArkControls.Panel {
-                label: "Recognition: " + (hwr.modelName || "")
-                description: hwr.modelInUse === "builtin"
-                    ? "rmpp-hwr's recognizer is off: the lasso button is reMarkable's own Convert to text, Convert page is hidden."
-                    : "Used by Convert page and Convert to ink. Add models in models/<name>/ (rec.onnx, dict.txt, model.txt)."
-                Layout.fillWidth: true
-            }
-            Repeater {
-                model: { try { return JSON.parse(hwr.modelList || "[]").concat([{ id: "builtin", name: "Off: reMarkable built-in recognizer", info: "rmpp-hwr off: reMarkable's own Convert to text only" }]); } catch (e) { return []; } }
-                delegate: ArkControls.Panel {
-                    required property var modelData
-                    label: modelData.name
-                    description: modelData.info || ""
-                    Layout.fillWidth: true
-                    Layout.leftMargin: ArkControls.Values.margin.horizontal.large
-                    action: ArkControls.Button {
-                        text: hwr.modelInUse === modelData.id ? "In use" : "Use"
-                        enabled: hwr.modelInUse !== modelData.id
-                        type: ArkTokens.Button.secondary
-                        onClicked: page.send("model:" + modelData.id)
-                    }
-                }
-            }
         }
     }
 }
@@ -750,10 +1054,112 @@ QObject *createInline(QQmlEngine *eng, QQmlContext *ctx, const char *qml, const 
 }
 
 #include "ink.h"
+#include "practice.h"
+#include "practicenb.h"
+#include "conversions.h"
 
-// Settings > Handwriting: a sidebar row below Bluetooth (or Wi-Fi) and the page over the payload area.
+// The passcode screen is up: a window's focus is on its pin keyboard, or a passcode/pincode item is visible.
+bool passcodeScreenUp() {
+    for (QWindow *w : QGuiApplication::allWindows())
+        if (auto *qw = qobject_cast<QQuickWindow *>(w))
+            if (qw->isVisible() && qw->activeFocusItem() && QByteArray(qw->activeFocusItem()->metaObject()->className()).contains("Pin"))
+                return true;
+    return findAnywhere([](QQuickItem *i) {
+        if (!i->isVisible()) return false;
+        const QByteArray c = i->metaObject()->className();
+        return c.contains("Passcode") || c.contains("Pincode") || c.contains("PinKeyboard");
+    }) != nullptr;
+}
+
+void tryInjectHelpers();
+QPointer<QObject> g_practiceHelper, g_convHelper;
+
+// The add-on touches xochitl's UI only after unlock: right after a restart, work on the passcode screen (QML compiles,
+// item walks, injected items) left heavy ghosting there (2026-11-12). Ready once the passcode screen is gone and
+// xochitl's library module is registered (the helpers can be created; that happens at unlock), or 60 s after the
+// passcode screen is gone if the module never comes (another OS version).
+bool uiReady() {
+    static bool ready = false;
+    static int clearTicks = 0;
+    if (ready) return true;
+    if (passcodeScreenUp()) { clearTicks = 0; return false; }
+    // the passcode screen appears a few seconds after xochitl starts: wait 9 s without it before touching the QML
+    // engine at all (a QML compile while it is first drawn is the suspect for its ghosting)
+    if (++clearTicks < 6) return false;
+    tryInjectHelpers();
+    if ((g_practiceHelper && g_convHelper) || clearTicks > 40) {
+        ready = true;
+        qWarning("[rmpp-hwr] UI ready (%s)", g_practiceHelper && g_convHelper ? "unlocked" : "without library helpers");
+    }
+    return ready;
+}
+
+// Helpers that need xochitl's QML engine but no screen of their own (practice import, conversion copies). The module
+// xofm.libs.library is registered a few seconds after start: tried on every timer tick until both are created.
+int g_helperTries = 0;
+void tryInjectHelpers() {
+    if (g_practiceHelper && g_convHelper) return;
+    QQuickItem *any = findAnywhere([](QQuickItem *i) { return qmlContext(i) != nullptr; });
+    QQmlEngine *eng = any ? qmlEngine(any) : nullptr;
+    if (!eng) return;
+    static QQmlContext *ctx = nullptr;
+    if (!ctx) {
+        ctx = new QQmlContext(eng->rootContext(), qApp);
+        ctx->setContextProperty(QStringLiteral("hwr"), g_state);
+    }
+    const bool quiet = ++g_helperTries % 40 != 1;   // the errors once a minute at most
+    auto make = [&](const char *qml, const char *name) -> QObject * {
+        QQmlComponent comp(eng);
+        comp.setData(QByteArray(qml), QUrl(QStringLiteral("qrc:/rmpphwr/%1.qml").arg(QLatin1String(name))));
+        QObject *o = comp.create(ctx);
+        if (!o && !quiet)
+            for (const auto &e : comp.errors()) qWarning("[rmpp-hwr] %s: %s", name, qPrintable(e.toString()));
+        if (o) o->setParent(ctx);
+        return o;
+    };
+    if (!g_practiceHelper) g_practiceHelper = make(kPracticeQml, "PracticeImport");
+    if (!g_convHelper) g_convHelper = make(kConvQml, "ConvCopy");
+    if (g_practiceHelper && g_convHelper) qWarning("[rmpp-hwr] helpers ready (try %d)", g_helperTries);
+}
+
+// ---- Settings rail order shared by the rmpp add-ons ----
+// Every rmpp row carries an int property "rmppOrder" and goes after xochitl's Wi-Fi row, sorted by it:
+//   rmpp-bt 100 (Bluetooth), rmpp-tailscale 200, rmpp-lang 300 (Languages), rmpp-hwr 400 (Handwriting).
+// Rows without the property are recognised by class / objectName. Each add-on places only its own row: after the
+// rmpp row with the highest order below its own, else after Wi-Fi, so the order is the same whoever injects first.
+int railOrder(QQuickItem *k) {
+    const QVariant v = k->property("rmppOrder");
+    if (v.isValid()) return v.toInt();
+    const char *cls = k->metaObject()->className();
+    if (qstrncmp(cls, "BtSidebarItem", 13) == 0) return 100;
+    if (qstrncmp(cls, "TsSidebarItem", 13) == 0) return 200;
+    if (k->objectName() == QLatin1String("rmppLangSidebarItem")) return 300;
+    if (k->objectName() == QLatin1String("rmppHwrSidebarItem")) return 400;
+    return -1;
+}
+
+void placeRailRow(QQuickItem *col, QQuickItem *row) {
+    const int mine = railOrder(row);
+    QQuickItem *after = nullptr, *wifi = nullptr;
+    int best = -1;
+    for (QQuickItem *k : col->childItems()) {
+        if (k == row) continue;
+        if (k->property("iconSource").toString().contains(QLatin1String("/wifi"))) wifi = k;
+        const int o = railOrder(k);
+        if (o >= 0 && o < mine && o > best) { best = o; after = k; }
+    }
+    if (!after) after = wifi;
+    if (!after) return;
+    const auto kids = col->childItems();
+    if (kids.indexOf(row) != kids.indexOf(after) + 1) row->stackAfter(after);   // only when out of place
+}
+
+QPointer<QQuickItem> g_railCol, g_railRow;
+
+// Settings > Handwriting: a sidebar row in the shared rail order and the page over the payload area.
 void tryInjectSettings() {
     QQuickItem *col = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("settingsColumn"); });
+    if (col && col == g_railCol && g_railRow) placeRailRow(col, g_railRow);   // other add-ons' rows may come later
     if (!col || col->property("_rmppHwr").toBool()) return;
     QQuickItem *settings = col;
     while (settings && settings->objectName() != QLatin1String("Settings")) settings = settings->parentItem();
@@ -768,13 +1174,9 @@ void tryInjectSettings() {
     ctx->setContextProperty(QStringLiteral("payloadLoaderRef"), loader);
     auto *row = qobject_cast<QQuickItem *>(createInline(eng, ctx, kSidebarQml, "Sidebar", col));
     if (row) {
-        QQuickItem *after = nullptr;
-        for (QQuickItem *k : col->childItems()) {
-            const QString icon = k->property("iconSource").toString();
-            if (icon.contains(QLatin1String("bluetooth"))) after = k;
-            else if (!after && icon.contains(QLatin1String("wifi"))) after = k;
-        }
-        if (after) row->stackAfter(after);
+        g_railCol = col;
+        g_railRow = row;
+        placeRailRow(col, row);
     }
     QObject *page = createInline(eng, ctx, kPageQml, "Page", settings);
     qWarning("[rmpp-hwr] settings: row=%s page=%s", row ? "ok" : "FAILED", page ? "ok" : "FAILED");
@@ -787,7 +1189,7 @@ import xofm.libs.toolbar
 ToolbarTool {
     objectName: "rmppHwrDoneButton"
     type: ToolbarTool.Type.FoldoutButton
-    shouldShow: toolbar.notePage && !!hwr.textPage
+    shouldShow: toolbar.notePage && !!hwr.textPage && hwr.converter === "rmpp"
     label: hwr.textPageDone ? "Correction saved (undo)" : "Done correcting"
     iconSource: "qrc:/ark/icons/hwc"
     onClicked: hwr.command = "mark:" + (hwr.textPageDone ? "0:" : "1:") + hwr.textPage + "#" + Date.now()
@@ -918,7 +1320,10 @@ import QtQuick
 MouseArea {
     anchors.fill: parent
     z: 1000
-    onClicked: hwr.command = "ink#" + Date.now()
+    enabled: hwr.converter === "rmpp"
+    onClicked: hwr.command = (hwr.textObject ? "ink#" : "text#") + Date.now()
+    // the text-object icon only while the tap is ours; the Binding restores xochitl's icon otherwise
+    Binding { target: btnRef; property: "iconSource"; value: inkIcon; when: hwr.converter === "rmpp" && !!hwr.textObject }
 }
 )QML";
 
@@ -950,8 +1355,10 @@ QString inkIconUrl() {
     return url;
 }
 
+// Typed-text lasso convert into reMarkable's text field is not built yet: without Text object mode xochitl's own
+// button stays in charge (the MouseArea below is disabled then).
 void tryInjectInkMenu() {
-    if (!g_state->value(QStringLiteral("lassoInk")).toBool() || builtinRecognizer()) return;   // built-in Convert to text
+    if (builtinRecognizer()) return;   // reMarkable's converter: leave its lasso button alone
     QQuickItem *menu = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionHandlerMenu"); });
     if (!menu) return;
     QQuickItem *btn = findItem(menu, [](QQuickItem *i) {
@@ -964,8 +1371,9 @@ void tryInjectInkMenu() {
     btn->setProperty("_rmppHwrInk", true);
     auto *ctx = new QQmlContext(base, btn);
     ctx->setContextProperty(QStringLiteral("hwr"), g_state);
+    ctx->setContextProperty(QStringLiteral("btnRef"), btn);
+    ctx->setContextProperty(QStringLiteral("inkIcon"), inkIconUrl());
     QObject *area = createInline(eng, ctx, kInkMenuQml, "InkMenu", btn);
-    btn->setProperty("iconSource", inkIconUrl());
     qWarning("[rmpp-hwr] lasso menu: convert button -> ink %s", area ? "ok" : "FAILED");
 }
 
@@ -1017,29 +1425,54 @@ void watchDoubleTap() {
 }
 
 void hwrInit() {
+#ifdef RMPP_HWR_INERT   // bisect build: loaded, does nothing
+    qWarning("[rmpp-hwr] loaded (inert test build)");
+    return;
+#endif
     auto *app = QCoreApplication::instance();
     g_state = new QQmlPropertyMap(app);
     g_state->insert(QStringLiteral("busy"), false);
     g_state->insert(QStringLiteral("status"), QString());
     g_state->insert(QStringLiteral("command"), QString());
-    g_state->insert(QStringLiteral("hideNative"), false);
+    g_state->insert(QStringLiteral("converter"), QStringLiteral("remarkable"));
     g_state->insert(QStringLiteral("hwrModel"), QStringLiteral("deployed"));
-    g_state->insert(QStringLiteral("lassoInk"), true);
-    g_state->insert(QStringLiteral("inkStyle"), QStringLiteral("own"));
-    g_state->insert(QStringLiteral("hasOwnGlyphs"), false);
-    g_state->insert(QStringLiteral("collect"), true);
+    g_state->insert(QStringLiteral("textObject"), false);
+    g_state->insert(QStringLiteral("lassoReplace"), false);
+    g_state->insert(QStringLiteral("pageReplace"), false);
+    g_state->insert(QStringLiteral("languageInUse"), QString());
+    g_state->insert(QStringLiteral("collect"), false);
+    g_state->insert(QStringLiteral("convCopy"), QString());
+    g_state->insert(QStringLiteral("practiceImport"), QString());
+    g_state->insert(QStringLiteral("practiceStatus"), QString());
+    g_state->insert(QStringLiteral("practiceBusy"), false);
+    g_state->insert(QStringLiteral("practiceLangs"), QStringLiteral("[]"));
+    g_state->insert(QStringLiteral("practiceList"), QStringLiteral("[]"));
     g_state->insert(QStringLiteral("inkText"), QString());
     g_state->insert(QStringLiteral("inkWeight"), 1);
     g_state->insert(QStringLiteral("inkSize"), 100);
     QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
         if (key != QLatin1String("command")) return;
         const QString cmd = v.toString().section(QLatin1Char('#'), 0, 0);
-        if (cmd == QLatin1String("page")) convertCurrentPage();
-        else if (cmd == QLatin1String("ink")) convertSelectionToInk(false);
+        if (cmd == QLatin1String("page")) {
+            if (g_state->value(QStringLiteral("pageReplace")).toBool()) convertPageInPlace();
+            else convertCurrentPage();
+        }
+        else if (cmd == QLatin1String("ink")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool());
+        else if (cmd == QLatin1String("text")) convertSelectionToInk(g_state->value(QStringLiteral("lassoReplace")).toBool(), false, true);
         else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
         else if (cmd == QLatin1String("inkok")) finishInkEdit(true);
         else if (cmd == QLatin1String("inkcancel")) finishInkEdit(false);
-        else if (cmd == QLatin1String("refresh")) refreshInfo();
+        else if (cmd == QLatin1String("refresh")) { refreshInfo(); refreshPracticeLangs(); refreshPracticeList(); }
+        else if (cmd.startsWith(QLatin1String("practice:new:"))) {   // practice:new:<lang>:<topic,topic>:<pages>
+            newPractice(cmd.section(QLatin1Char(':'), 2, 2),
+                        cmd.section(QLatin1Char(':'), 3, 3).split(QLatin1Char(','), Qt::SkipEmptyParts),
+                        cmd.section(QLatin1Char(':'), 4, 4).toInt());
+        }
+        else if (cmd.startsWith(QLatin1String("conv:copied:")))   // from kConvQml: conv:copied:<ok>:<doc>:<before>
+            convCopied(cmd.section(QLatin1Char(':'), 2, 2) == QLatin1String("1"), cmd.section(QLatin1Char(':'), 3, 3),
+                       cmd.section(QLatin1Char(':'), 4, 4).toInt());
+        else if (cmd.startsWith(QLatin1String("practice:importing:")))   // from kPracticeQml
+            practiceImporting(cmd.section(QLatin1Char(':'), 2, 2) == QLatin1String("1"), cmd.section(QLatin1Char(':'), 3, 3));
         else if (cmd == QLatin1String("delall")) deleteConversions(QString());
         else if (cmd.startsWith(QLatin1String("del:"))) deleteConversions(cmd.mid(4));
         else if (cmd.startsWith(QLatin1String("show:"))) showRecord(cmd.mid(5));
@@ -1047,8 +1480,9 @@ void hwrInit() {
             markRecord(cmd.mid(7), cmd.mid(5, 1) == QLatin1String("1"));
             updateCurrentPage();
         }
-        else if (cmd.startsWith(QLatin1String("style:"))) {
-            saveSetting(QStringLiteral("inkStyle"), cmd.mid(6));   // glyphs reload on the next conversion
+        else if (cmd.startsWith(QLatin1String("converter:"))) {
+            saveSetting(QStringLiteral("converter"), cmd.mid(10) == QLatin1String("remarkable") ? QStringLiteral("remarkable") : QStringLiteral("rmpp"));
+            refreshInfo();
         }
         else if (cmd.startsWith(QLatin1String("model:"))) {
             // settings.conf key "model"; in the QML map it is "hwrModel": a map key named "model" broke xochitl's
@@ -1059,14 +1493,18 @@ void hwrInit() {
             st.sync();
             refreshInfo();   // the recognizer reloads with the new model on its next use
         }
+        else if (cmd.startsWith(QLatin1String("delmodel:"))) deleteModel(cmd.mid(9));
         else if (cmd.startsWith(QLatin1String("set:"))) {
             const QString name = cmd.section(QLatin1Char(':'), 1, 1);
-            if (name == QLatin1String("hideNative") || name == QLatin1String("collect") || name == QLatin1String("lassoInk"))
+            if (name == QLatin1String("collect") || name == QLatin1String("textObject") || name == QLatin1String("lassoReplace")
+                || name == QLatin1String("pageReplace"))
                 saveSetting(name, cmd.section(QLatin1Char(':'), 2, 2) == QLatin1String("1"));
         }
     });
     auto *t = new QTimer(app);
-    QObject::connect(t, &QTimer::timeout, app, [] { loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage();
+    QObject::connect(t, &QTimer::timeout, app, [] {
+        if (!uiReady()) return;   // nothing UI-side before the passcode screen is gone (ghosting there)
+        loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage();
 #ifdef RMPP_HWR_DEV
         watchCmdFile();
 #endif
