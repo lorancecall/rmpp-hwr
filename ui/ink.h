@@ -303,7 +303,7 @@ QList<QPair<double, QString>> centredLines(const QStringList &lines) {
 }
 
 void recognizeAndPut(QPointer<QQuickItem> dvp, QPointer<QObject> scp, int layer, const QRectF &sel, bool replace,
-                     bool toText, const QStringList &objLines);
+                     bool toText, const QStringList &objLines, bool pageConvert);
 
 // Lasso convert. toText: typed text into the page's text column (see putText); otherwise a text object (rmpp-textobj).
 // Text objects in the selection are not recognized again: only text objects -> their text is typed (toText) or the
@@ -325,6 +325,7 @@ void convertSelectionToInk(bool replace, bool toText) {
     const QStringList objLines = QString::fromUtf8(buf.constData()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     QPointer<QObject> scp(sc);
     QPointer<QQuickItem> dvp(dv);
+    const bool pageConvert = g_pageConvert;   // set only during this call (convertPageInPlace)
     if (kind == 1) {   // only text objects: their text, no recognition
         if (!toText) { to.editSelection(); return; }
         qWarning("[rmpp-hwr] text objects -> typed text (not recognized again)");
@@ -338,21 +339,21 @@ void convertSelectionToInk(bool replace, bool toText) {
             if (!scp || !dvp) return;
             const QRectF rest = selectionRect(scp, layer);
             if (rest.isEmpty()) { setStatus(QStringLiteral("only text objects selected"), false); return; }
-            recognizeAndPut(dvp, scp, layer, rest, replace, toText, objLines);
+            recognizeAndPut(dvp, scp, layer, rest, replace, toText, objLines, pageConvert);
         });
         return;
     }
-    recognizeAndPut(dvp, scp, layer, sel, replace, toText, {});
+    recognizeAndPut(dvp, scp, layer, sel, replace, toText, {}, pageConvert);
 }
 
 void recognizeAndPut(QPointer<QQuickItem> dvp, QPointer<QObject> scp, int layer, const QRectF &sel, bool replace,
-                     bool toText, const QStringList &objLines) {
+                     bool toText, const QStringList &objLines, bool pageConvert) {
     QObject *doc = dvp ? dvp->property("document").value<QObject *>() : nullptr;
     if (!dvp || !scp || !doc) return;
     const QString pageId = dvp->property("currentPageId").toString();
     const QImage img = selectionImage();
     if (img.isNull()) { setStatus(QStringLiteral("no selection image"), false); return; }
-    if (toText) g_convCtx = ConvCtx{doc->property("id").toString(), pageId, dvp->property("currentPage").toInt(), img, g_pageConvert};
+    if (toText) g_convCtx = ConvCtx{doc->property("id").toString(), pageId, dvp->property("currentPage").toInt(), img, pageConvert};
     setStatus(QStringLiteral("Converting…"), true);
     showInkBusy(dvp);
     const QString lang = modelLanguageInUse();
