@@ -72,7 +72,7 @@ Building needs the Arm GNU aarch64 toolchain, Qt 6.10 headers/device libraries a
 `cargo build --release --target aarch64-unknown-linux-gnu`). Training and the code: [develop.md](develop.md).
 
 The package recipes (VELBUILD) are in
-[rmpp-packages/packages](https://github.com/lorancecall/rmpp-packages/tree/main/packages); the next `vellum upgrade`
+[packaging/](../packaging/) (rmpp-packages builds and publishes them from there); the next `vellum upgrade`
 or reinstall puts the released files back.
 
 On the Paper Pro, never run `systemctl stop xochitl` (it powers the Paper Pro off); run `systemctl reset-failed xochitl`
