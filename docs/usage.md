@@ -8,7 +8,7 @@ The recognized text is typed into the page on the line where you wrote it, or, i
 
 Text objects are drawn by [rmpp-textobj](https://github.com/lorancecall/rmpp-textobj): ordinary pen strokes in the
 language's font that you can move, resize and copy like handwriting, and edit as text with a double tap (selection
-tool). Text object mode needs rmpp-textobj and the language's [rmpp-lang](https://github.com/lorancecall/rmpp-lang)
+tool). Text object mode uses rmpp-textobj (it comes with rmpp-hwr) and the language's [rmpp-lang](https://github.com/lorancecall/rmpp-lang)
 add-on (its glyphs). Text objects in the selection are not recognized again: their text is used as it is, and only
 the handwriting around them is recognized.
 
@@ -25,7 +25,6 @@ page itself (Settings > Handwriting > Convert).
   (`rmpp-hwr-ko`, `rmpp-hwr-en`, ...; removed with `vellum del`) and models you trained yourself in
   `/home/root/.local/share/rmpp-hwr/models/<name>/` (`rec.onnx`, `dict.txt`, `model.txt`; listed by the first line of
   `model.txt`).
-- **Convert**: Convert page on a new page or into the page; lasso convert to typed text or to a text object (needs
-  rmpp-textobj).
+- **Convert**: Convert page on a new page or into the page; lasso convert to typed text or to a text object.
 - **Collect training data**: new practice notebooks (lines to write, for [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db)
   or your own model) and Save conversions (keeps a copy of the pages you convert, off unless you turn it on).

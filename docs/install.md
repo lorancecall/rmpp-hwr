@@ -7,13 +7,13 @@ command line, the release files, and building and installing it yourself.
 
 | Package | What |
 |---|---|
-| `rmpp-hwr` | the add-on: lasso convert, Convert page, Settings > Handwriting, the recognizer and onnxruntime (needs `rmpp-preload`) |
+| `rmpp-hwr` | the add-on: lasso convert, Convert page, Settings > Handwriting, the recognizer and onnxruntime (needs `rmpp-preload`; brings `rmpp-textobj`) |
 | `rmpp-hwr-ko` | Korean model (the one trained on [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db)) |
 | `rmpp-hwr-zh`, `rmpp-hwr-ja`, `rmpp-hwr-en`, `rmpp-hwr-latin` | base models of other languages |
 
-Text object mode (recognized handwriting drawn as a movable, editable text object) also needs
-[rmpp-textobj](https://github.com/lorancecall/rmpp-textobj) and the language's add-on of
-[rmpp-lang](https://github.com/lorancecall/rmpp-lang) (its glyphs).
+Text object mode (recognized handwriting drawn as a movable, editable text object) uses
+[rmpp-textobj](https://github.com/lorancecall/rmpp-textobj), which comes with `rmpp-hwr` (a dependency), and the
+language's add-on of [rmpp-lang](https://github.com/lorancecall/rmpp-lang) (its glyphs).
 
 Files: the packages put theirs under `/home/root/.vellum/share/<package>/`; the add-on's UI library goes to
 `/usr/lib/rmpp/rmpp-hwr/` and is loaded through `/usr/lib/rmpp/preload.d/60-rmpp-hwr.so`. Your own data (records,
@@ -31,8 +31,7 @@ wget -qO- https://lorancecall.github.io/rmpp-packages/install.sh | sh
 Then:
 
 ```sh
-vellum add rmpp-hwr rmpp-hwr-ko          # add the other languages' models as you like: rmpp-hwr-en ...
-vellum add rmpp-textobj                  # optional: text object mode
+vellum add rmpp-hwr rmpp-hwr-ko          # rmpp-textobj comes with rmpp-hwr; other models as you like: rmpp-hwr-en ...
 vellum upgrade                           # later: updates
 vellum reenable                          # after a reMarkable OS update
 ```

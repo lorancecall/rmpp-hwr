@@ -31,8 +31,8 @@ On the tablet ([details](docs/usage.md)):
 
 - Install **rmpp setup** (desktop app or one-line script) from
   [rmpp-packages](https://github.com/lorancecall/rmpp-packages#install) and tick **rmpp-hwr** (not preselected); the
-  Korean model comes with it, the other languages' models are listed under it. For text object mode tick
-  **rmpp-textobj** as well. Developer mode is needed: the rmpp-packages page explains it.
+  Korean model and rmpp-textobj (text objects) come with it, the other languages' models are listed under it.
+  Developer mode is needed: the rmpp-packages page explains it.
 - After a reMarkable OS update: **Restore** in rmpp setup.
 - Other ways (Vellum on the command line, the release files, `hwr install` and building it yourself) and removal:
   [docs/install.md](docs/install.md).
