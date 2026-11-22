@@ -46,30 +46,30 @@ for t in pack-*.tar; do
 	rm -rf "$D/models/$id" && mv "$D/models/$id.new/$id" "$D/models/$id" && rm -rf "$D/models/$id.new"
 done
 # never `systemctl stop xochitl` (it powers the tablet off); reset-failed avoids the restart limit
-P=/home/root/.vellum/share/rmpp-preload
+P=/usr/lib/rmpp
 if [ -x "$P/launch" ]; then
-	# rmpp-preload 0.2+: everything in /home, a link in its preload.d (a factory reset removes it all)
-	cp librmpp-hwr-ui.so "$D/librmpp-hwr-ui.so.new" && mv -f "$D/librmpp-hwr-ui.so.new" "$D/librmpp-hwr-ui.so"
-	mkdir -p "$P/preload.d"
-	ln -sf "$D/librmpp-hwr-ui.so" "$P/preload.d/60-rmpp-hwr.so"
+	# rmpp-preload 0.2+: every rmpp system file under /usr/lib/rmpp. The UI library goes to $P/rmpp-hwr with a
+	# link in $P/preload.d; a library xochitl has loaded is renamed or moved to $P/.trash, never deleted
+	# ($P/restart deletes it after the restart). Plain remount: Vellum's mount-rw would drop /etc/dropbear.
+	mount -o remount,rw /
+	mkdir -p "$P/rmpp-hwr" "$P/preload.d"
+	cp librmpp-hwr-ui.so "$P/rmpp-hwr/librmpp-hwr-ui.so.new" && chmod 755 "$P/rmpp-hwr/librmpp-hwr-ui.so.new" &&
+		{ [ ! -e "$P/rmpp-hwr/librmpp-hwr-ui.so" ] || mv -f "$P/rmpp-hwr/librmpp-hwr-ui.so" "$P/rmpp-hwr/librmpp-hwr-ui.so.old"; } &&
+		mv -f "$P/rmpp-hwr/librmpp-hwr-ui.so.new" "$P/rmpp-hwr/librmpp-hwr-ui.so"
+	ln -sfn ../rmpp-hwr/librmpp-hwr-ui.so "$P/preload.d/60-rmpp-hwr.so"
 	if [ -e /usr/lib/rmpp-hwr ] || [ -L /usr/lib/rmpp-preload.d/60-rmpp-hwr.so ]; then   # older install
-		mount -o remount,rw /
+		mkdir -p "$P/.trash"
 		rm -f /usr/lib/rmpp-preload.d/60-rmpp-hwr.so
-		rm -rf /usr/lib/rmpp-hwr
-		sync
-		systemctl stop rmpp-restart-xochitl.timer 2>/dev/null || true   # this restart covers pending requests
-		systemctl reset-failed xochitl 2>/dev/null || true
-		systemctl restart xochitl
-		sleep 3
-		mount -o remount,ro / || echo "warning: / is still read-write"
-	else
-		# share one xochitl restart with the Vellum packages installed just before: (re)arm their timer
-		systemctl stop rmpp-restart-xochitl.timer 2>/dev/null || true
-		systemd-run --quiet --unit=rmpp-restart-xochitl --on-active=15 --timer-property=AccuracySec=1s \
-			/bin/sh -c 'systemctl reset-failed xochitl; systemctl restart xochitl' || \
-			{ systemctl reset-failed xochitl 2>/dev/null || true; systemctl restart xochitl; }
-		echo "xochitl restarts in about 15 seconds"
+		[ ! -e /usr/lib/rmpp-hwr ] || mv /usr/lib/rmpp-hwr "$P/.trash/rmpp-hwr.$$"
 	fi
+	sync
+	mount -o remount,ro / || echo "note: / stays read-write until xochitl restarts"
+	# share one xochitl restart with the Vellum packages installed just before: (re)arm their timer
+	systemctl stop rmpp-restart-xochitl.timer 2>/dev/null || true
+	systemd-run --quiet --unit=rmpp-restart-xochitl --on-active=15 --timer-property=AccuracySec=1s \
+		/bin/sh -c '[ -x /usr/lib/rmpp/restart ] && exec /usr/lib/rmpp/restart; systemctl reset-failed xochitl; systemctl restart xochitl' || \
+		{ systemctl reset-failed xochitl 2>/dev/null || true; systemctl restart xochitl; }
+	echo "xochitl restarts in about 15 seconds"
 else
 	# older rmpp-preload: the UI library in /usr/lib
 	mount -o remount,rw /

@@ -100,7 +100,7 @@ def pick_tablet():
         print(f"{TABLET} does not answer; using {alt}", file=sys.stderr)
         TABLET = alt
 DEV_DIR = "/home/root/.local/share/rmpp-hwr"
-PRELOAD_HOME = "/home/root/.vellum/share/rmpp-preload"   # rmpp-preload 0.2+: add-ons link into preload.d here
+PRELOAD_DIR = "/usr/lib/rmpp"   # rmpp-preload 0.2+: every rmpp system file lives here (launch, preload.d, <add-on>/)
 XOCHITL = "/home/root/.local/share/remarkable/xochitl"
 EVAL_DOC = cfg("HWR_EVAL_DOC")                              # its first EVAL_N lines are never trained on
 EVAL_N = int(cfg("HWR_EVAL_N", "12"))
@@ -700,8 +700,8 @@ def cmd_install(a):
                 urllib.request.urlretrieve(f"{base}/{n}", cache / n)
         ui_so, rec_so, ort_so = cache / "librmpp-hwr-ui.so", cache / "librmpp_hwr.so", cache / "libonnxruntime.so"
         glyphs = cache / "glyphs.json"
-    preload_home = ssh(TABLET, f"test -x {PRELOAD_HOME}/launch && echo ok || true", capture=True).strip() == "ok"
-    if not preload_home and not ssh(TABLET, "test -d /usr/lib/rmpp-preload.d && echo ok || true", capture=True).strip():
+    preload_rmpp = ssh(TABLET, f"test -x {PRELOAD_DIR}/launch && echo ok || true", capture=True).strip() == "ok"
+    if not preload_rmpp and not ssh(TABLET, "test -d /usr/lib/rmpp-preload.d && echo ok || true", capture=True).strip():
         sys.exit("rmpp-preload is not installed on the tablet: `vellum add rmpp-preload` "
                  "(https://github.com/lorancecall/rmpp-packages), then run `hwr install` again")
     has_model = ssh(TABLET, f"test -f {DEV_DIR}/rec.onnx && echo yes || true", capture=True).strip() == "yes"
@@ -733,19 +733,26 @@ def cmd_install(a):
               f"{mv}\n"
               f"rm -rf {DEV_DIR}/texts.new && mkdir -p {DEV_DIR}/texts.new && tar -xf {DEV_DIR}/texts.tar -C {DEV_DIR}/texts.new\n"
               f"rm -rf {DEV_DIR}/texts && mv {DEV_DIR}/texts.new {DEV_DIR}/texts && rm -f {DEV_DIR}/texts.tar\n")
-    if preload_home:
-        # rmpp-preload 0.2+: everything in /home, a link in its preload.d; remove an older /usr/lib install
+    if preload_rmpp:
+        # rmpp-preload 0.2+: the UI library in /usr/lib/rmpp/rmpp-hwr, a link in /usr/lib/rmpp/preload.d. The loaded
+        # library is renamed (not deleted) until xochitl restarts, so / can go back to read-only afterwards.
+        L = f"{PRELOAD_DIR}/rmpp-hwr/librmpp-hwr-ui.so"
         ssh(TABLET, common +
-                    f"mv -f {DEV_DIR}/librmpp-hwr-ui.so.new {DEV_DIR}/librmpp-hwr-ui.so\n"
-                    f"mkdir -p {PRELOAD_HOME}/preload.d\n"
-                    f"ln -sf {DEV_DIR}/librmpp-hwr-ui.so {PRELOAD_HOME}/preload.d/60-rmpp-hwr.so\n"
-                    "if [ -e /usr/lib/rmpp-hwr ] || [ -L /usr/lib/rmpp-preload.d/60-rmpp-hwr.so ]; then\n"
-                    "  mount -o remount,rw /; rm -f /usr/lib/rmpp-preload.d/60-rmpp-hwr.so; rm -rf /usr/lib/rmpp-hwr; sync\n"
-                    "  systemctl reset-failed xochitl || true; systemctl restart xochitl; sleep 3\n"
-                    "  mount -o remount,ro / || echo 'warning: / is still read-write'\n"
-                    "else\n"
-                    "  systemctl reset-failed xochitl || true; systemctl restart xochitl; sleep 3\n"
-                    "fi\n"
+                    "mount -o remount,rw /\n"
+                    f"mkdir -p {PRELOAD_DIR}/rmpp-hwr {PRELOAD_DIR}/preload.d {PRELOAD_DIR}/.trash\n"
+                    f"cp {DEV_DIR}/librmpp-hwr-ui.so.new {L}.new && rm -f {DEV_DIR}/librmpp-hwr-ui.so.new\n"
+                    f"[ ! -e {L} ] || mv -f {L} {L}.old\n"
+                    f"mv -f {L}.new {L}\n"
+                    f"ln -sfn ../rmpp-hwr/librmpp-hwr-ui.so {PRELOAD_DIR}/preload.d/60-rmpp-hwr.so\n"
+                    "rm -f /usr/lib/rmpp-preload.d/60-rmpp-hwr.so\n"
+                    f"[ ! -e /usr/lib/rmpp-hwr ] || mv /usr/lib/rmpp-hwr {PRELOAD_DIR}/.trash/rmpp-hwr.$$\n"
+                    "sync\n"
+                    "systemctl reset-failed xochitl || true\n"
+                    "systemctl restart xochitl\n"
+                    "sleep 3\n"
+                    f"rm -rf {L}.old {PRELOAD_DIR}/.trash\n"
+                    "sync\n"
+                    "mount -o remount,ro / || echo 'warning: / is still read-write'\n"
                     "systemctl is-active xochitl")
         print(f"rmpp-hwr installed ({'model ' + str(model) if model else 'kept the model on the tablet'}); "
               "Convert page is in the toolbar, settings in Settings > Handwriting")
@@ -771,15 +778,16 @@ def cmd_uninstall(a):
     """Remove the UI add-on and the recognizer; with --purge also the model, records and settings."""
     extra = f"rm -rf {DEV_DIR} /home/root/.config/rmpp-hwr\n" if a.purge else \
         f"rm -f {DEV_DIR}/librmpp_hwr.so* {DEV_DIR}/libonnxruntime.so\n"
+    # unlink first, restart (nothing loads it any more), then delete: / can go back to read-only
     ssh(TABLET, "set -e\n"
-                f"rm -f {PRELOAD_HOME}/preload.d/60-rmpp-hwr.so {DEV_DIR}/librmpp-hwr-ui.so\n"
-                "if [ -e /usr/lib/rmpp-hwr ] || [ -L /usr/lib/rmpp-preload.d/60-rmpp-hwr.so ]; then\n"
-                "  mount -o remount,rw /; rm -f /usr/lib/rmpp-preload.d/60-rmpp-hwr.so; rm -rf /usr/lib/rmpp-hwr; sync\n"
-                "  systemctl reset-failed xochitl || true; systemctl restart xochitl; sleep 3\n"
-                "  mount -o remount,ro / || echo 'warning: / is still read-write'\n"
-                "else\n"
-                "  systemctl reset-failed xochitl || true; systemctl restart xochitl; sleep 3\n"
-                "fi\n" + extra)
+                "mount -o remount,rw /\n"
+                f"rm -f {PRELOAD_DIR}/preload.d/60-rmpp-hwr.so /usr/lib/rmpp-preload.d/60-rmpp-hwr.so\n"
+                "systemctl reset-failed xochitl || true\n"
+                "systemctl restart xochitl\n"
+                "sleep 3\n"
+                f"rm -rf {PRELOAD_DIR}/rmpp-hwr /usr/lib/rmpp-hwr\n"
+                "sync\n"
+                "mount -o remount,ro / || echo 'warning: / is still read-write'\n" + extra)
     print("rmpp-hwr removed" + (" with all data" if a.purge else "; model, records and settings kept (--purge removes them)"))
 
 
