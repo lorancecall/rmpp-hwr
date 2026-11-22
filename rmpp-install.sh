@@ -33,13 +33,18 @@ if [ -x "$P/launch" ]; then
 		rm -f /usr/lib/rmpp-preload.d/60-rmpp-hwr.so
 		rm -rf /usr/lib/rmpp-hwr
 		sync
+		systemctl stop rmpp-restart-xochitl.timer 2>/dev/null || true   # this restart covers pending requests
 		systemctl reset-failed xochitl 2>/dev/null || true
 		systemctl restart xochitl
 		sleep 3
 		mount -o remount,ro / || echo "warning: / is still read-write"
 	else
-		systemctl reset-failed xochitl 2>/dev/null || true
-		systemctl restart xochitl
+		# share one xochitl restart with the Vellum packages installed just before: (re)arm their timer
+		systemctl stop rmpp-restart-xochitl.timer 2>/dev/null || true
+		systemd-run --quiet --unit=rmpp-restart-xochitl --on-active=15 --timer-property=AccuracySec=1s \
+			/bin/sh -c 'systemctl reset-failed xochitl; systemctl restart xochitl' || \
+			{ systemctl reset-failed xochitl 2>/dev/null || true; systemctl restart xochitl; }
+		echo "xochitl restarts in about 15 seconds"
 	fi
 else
 	# older rmpp-preload: the UI library in /usr/lib
