@@ -31,8 +31,8 @@ struct RmglFile {
     bool bad = false;              // not a usable RMGL v1 file (logged once)
 };
 
-std::vector<RmglFile> g_rmgl;          // installed glyph files in lookup order
-QString g_rmglKey;                     // order the list was built for ("ko,ja,zh,...")
+std::map<QString, RmglFile> g_rmglFiles;   // installed glyph files by language (mapped or not)
+QStringList g_rmglOrder;                   // lookup order (languages)
 QHash<char32_t, Glyph> g_glyphCache;   // looked-up glyphs (from any source), for the current order
 QSet<char32_t> g_glyphMiss;            // looked up, found nowhere
 QHash<char32_t, Glyph> g_jsonGlyphs;   // glyphs.json, parsed on first need
@@ -56,33 +56,46 @@ QStringList rmppLangOrder() {
 }
 
 void unmapGlyphFiles() {
-    for (RmglFile &f : g_rmgl) {
+    for (auto &kv : g_rmglFiles) {
+        RmglFile &f = kv.second;
         if (f.base) f.file->unmap(const_cast<uchar *>(f.base));
         f.base = nullptr;
         f.file.reset();
     }
 }
 
-// The installed glyph files, `first` language first. Rebuilt (and the cache dropped) when the order changes.
-void orderGlyphFiles(const QString &first) {
+// Languages with a glyph file installed.
+QStringList glyphFileLanguages() {
     QStringList codes = QDir(QLatin1String(kLangGlyphDir)).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
     codes.erase(std::remove_if(codes.begin(), codes.end(), [](const QString &c) {
         return !QFileInfo::exists(QLatin1String(kLangGlyphDir) + QLatin1Char('/') + c + QStringLiteral("/glyphs.rmgl")); }), codes.end());
+    return codes;
+}
+
+// The installed languages in lookup order: `first`, then rmpp-lang's order, then the rest by code.
+QStringList glyphOrder(const QString &first) {
+    const QStringList codes = glyphFileLanguages();
     QStringList order;
     if (codes.contains(first)) order << first;
     for (const QString &c : rmppLangOrder()) if (codes.contains(c) && !order.contains(c)) order << c;
     for (const QString &c : codes) if (!order.contains(c)) order << c;
-    const QString key = order.join(QLatin1Char(','));
-    if (key == g_rmglKey && int(g_rmgl.size()) == int(order.size())) return;
-    unmapGlyphFiles();
-    g_rmgl.clear();
-    for (const QString &c : order) {
-        RmglFile f;
-        f.lang = c;
-        f.path = QLatin1String(kLangGlyphDir) + QLatin1Char('/') + c + QStringLiteral("/glyphs.rmgl");
-        g_rmgl.push_back(std::move(f));
+    return order;
+}
+
+RmglFile &glyphFile(const QString &lang) {
+    RmglFile &f = g_rmglFiles[lang];
+    if (f.path.isEmpty()) {
+        f.lang = lang;
+        f.path = QLatin1String(kLangGlyphDir) + QLatin1Char('/') + lang + QStringLiteral("/glyphs.rmgl");
     }
-    g_rmglKey = key;
+    return f;
+}
+
+// Look glyphs up in this order from now on; the looked-up glyphs are dropped when the order changes (a character
+// may come from another file now). Mapped files stay mapped.
+void orderGlyphFiles(const QStringList &order) {
+    if (order == g_rmglOrder) return;
+    g_rmglOrder = order;
     g_glyphCache.clear();
     g_glyphMiss.clear();
 }
@@ -188,8 +201,10 @@ const Glyph *glyphOf(char32_t cp) {
     if (it != g_glyphCache.constEnd()) return &*it;
     if (g_glyphMiss.contains(cp)) return nullptr;
     Glyph g;
-    for (RmglFile &f : g_rmgl)
+    for (const QString &l : g_rmglOrder) {
+        RmglFile &f = glyphFile(l);
         if (mapGlyphFile(f) && readGlyph(f, cp, &g)) return &*g_glyphCache.insert(cp, g);
+    }
     loadJsonGlyphs();
     auto j = g_jsonGlyphs.constFind(cp);
     if (j != g_jsonGlyphs.constEnd()) return &*g_glyphCache.insert(cp, *j);
@@ -197,22 +212,44 @@ const Glyph *glyphOf(char32_t cp) {
     return nullptr;
 }
 
-// The language whose glyph file is looked up first for `text`: Japanese for kana, Korean for Hangul, else the
-// language of the recognition model in use (Han characters: zh, ja and ko draw them differently).
-QString glyphLanguageOf(const QString &text) {
-    bool cyr = false;
-    for (const uint c : text.toUcs4()) {
-        if ((c >= 0x3040 && c <= 0x30ff) || (c >= 0x31f0 && c <= 0x31ff)) return QStringLiteral("ja");
-        if ((c >= 0xac00 && c <= 0xd7a3) || (c >= 0x1100 && c <= 0x11ff) || (c >= 0x3130 && c <= 0x318f)) return QStringLiteral("ko");
-        if (c >= 0x0400 && c <= 0x04ff) cyr = true;
+// The glyph file has the character (index only, no glyph decoded).
+bool glyphFileHas(const QString &lang, char32_t cp) {
+    RmglFile &f = glyphFile(lang);
+    if (!mapGlyphFile(f)) return false;
+    quint32 lo = 0, hi = f.count;
+    const uchar *idx = f.base + f.index;
+    while (lo < hi) {
+        const quint32 mid = lo + (hi - lo) / 2;
+        if (rd32(idx + 8ull * mid) < cp) lo = mid + 1;
+        else hi = mid;
     }
-    const QString dir = currentModelDir();
-    const QString model = dir.isEmpty() ? QString() : modelLanguage(dir, modelName(dir, QString()));
-    if (cyr) return model == QLatin1String("bg") ? model : QStringLiteral("ru");
-    return model;
+    return lo < f.count && rd32(idx + 8ull * lo) == cp;
 }
 
-void useGlyphLanguage(const QString &text) { orderGlyphFiles(glyphLanguageOf(text)); }
+// The lookup order for `text`. First the text's language: Japanese for kana, Korean for Hangul; Russian (or
+// Bulgarian with a Bulgarian model) for Cyrillic. Han without kana or Hangul is drawn differently in zh, ja and ko:
+// the first language, in the order model's language -> rmpp-lang's order, whose file has every Han character of the
+// text (simplified Chinese is only in zh, so Chinese text gets zh), else the model's language.
+QStringList glyphOrderFor(const QString &text) {
+    const QString dir = currentModelDir();
+    const QString model = dir.isEmpty() ? QString() : modelLanguage(dir, modelName(dir, QString()));
+    bool cyr = false;
+    QList<char32_t> han;
+    for (const uint c : text.toUcs4()) {
+        if ((c >= 0x3040 && c <= 0x30ff) || (c >= 0x31f0 && c <= 0x31ff)) return glyphOrder(QStringLiteral("ja"));
+        if ((c >= 0xac00 && c <= 0xd7a3) || (c >= 0x1100 && c <= 0x11ff) || (c >= 0x3130 && c <= 0x318f)) return glyphOrder(QStringLiteral("ko"));
+        if (c >= 0x0400 && c <= 0x04ff) cyr = true;
+        if ((c >= 0x3400 && c <= 0x9fff) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0x20000 && c <= 0x3ffff)) han << char32_t(c);
+    }
+    if (cyr) return glyphOrder(model == QLatin1String("bg") ? model : QStringLiteral("ru"));
+    const QStringList order = glyphOrder(model);
+    if (!han.isEmpty())
+        for (const QString &l : order)
+            if (std::all_of(han.begin(), han.end(), [&](char32_t c) { return glyphFileHas(l, c); })) return glyphOrder(l);
+    return order;
+}
+
+void useGlyphLanguage(const QString &text) { orderGlyphFiles(glyphOrderFor(text)); }
 
 // Some ink font is installed (a glyph file or glyphs.json). Reads no glyph.
 bool glyphsAvailable() {
@@ -227,8 +264,8 @@ void releaseIdleGlyphs() {
     if (!g_glyphUse.isValid() || g_glyphUse.elapsed() < 120000) return;
     g_glyphUse.invalidate();
     unmapGlyphFiles();
-    g_rmgl.clear();
-    g_rmglKey.clear();
+    g_rmglFiles.clear();
+    g_rmglOrder.clear();
     g_glyphCache.clear();
     g_glyphMiss.clear();
     g_jsonGlyphs.clear();

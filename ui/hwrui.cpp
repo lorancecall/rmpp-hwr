@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <vector>
 #include <functional>
@@ -1346,6 +1347,13 @@ void watchCmdFile() {
 
 void devCommand(const QString &cmd) {
     if (cmd == QLatin1String("probe")) probe();
+    else if (cmd == QLatin1String("state")) {   // the UI state (settings, model list) to state.txt
+        refreshInfo();
+        QFile f(QLatin1String(kDataDir) + QStringLiteral("/state.txt"));
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+            for (const QString &k : g_state->keys()) f.write((k + QStringLiteral(" = ") + g_state->value(k).toString() + QLatin1Char('\n')).toUtf8());
+        qWarning("[rmpp-hwr] model dir in use: %s", qPrintable(currentModelDir()));
+    }
     else if (cmd == QLatin1String("ink")) convertSelectionToInk(false);
     else if (cmd == QLatin1String("ink:replace")) convertSelectionToInk(true);
     else if (cmd.startsWith(QLatin1String("load "))) {   // load <path.so> [arg]: run an experiment without restarting
