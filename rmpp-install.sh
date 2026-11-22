@@ -22,14 +22,36 @@ if [ ! -f "$D/rec.onnx" ]; then            # keep a personal model that was depl
 	done
 fi
 # never `systemctl stop xochitl` (it powers the tablet off); reset-failed avoids the restart limit
-mount -o remount,rw /
-mkdir -p /usr/lib/rmpp-hwr /usr/lib/rmpp-preload.d
-cp librmpp-hwr-ui.so /usr/lib/rmpp-hwr/librmpp-hwr-ui.so.new
-mv -f /usr/lib/rmpp-hwr/librmpp-hwr-ui.so.new /usr/lib/rmpp-hwr/librmpp-hwr-ui.so
-ln -sf /usr/lib/rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp-preload.d/60-rmpp-hwr.so
-sync
-systemctl reset-failed xochitl 2>/dev/null || true
-systemctl restart xochitl
-sleep 3
-mount -o remount,ro / || echo "warning: / is still read-write"
+P=/home/root/.vellum/share/rmpp-preload
+if [ -x "$P/launch" ]; then
+	# rmpp-preload 0.2+: everything in /home, a link in its preload.d (a factory reset removes it all)
+	cp librmpp-hwr-ui.so "$D/librmpp-hwr-ui.so.new" && mv -f "$D/librmpp-hwr-ui.so.new" "$D/librmpp-hwr-ui.so"
+	mkdir -p "$P/preload.d"
+	ln -sf "$D/librmpp-hwr-ui.so" "$P/preload.d/60-rmpp-hwr.so"
+	if [ -e /usr/lib/rmpp-hwr ] || [ -L /usr/lib/rmpp-preload.d/60-rmpp-hwr.so ]; then   # older install
+		mount -o remount,rw /
+		rm -f /usr/lib/rmpp-preload.d/60-rmpp-hwr.so
+		rm -rf /usr/lib/rmpp-hwr
+		sync
+		systemctl reset-failed xochitl 2>/dev/null || true
+		systemctl restart xochitl
+		sleep 3
+		mount -o remount,ro / || echo "warning: / is still read-write"
+	else
+		systemctl reset-failed xochitl 2>/dev/null || true
+		systemctl restart xochitl
+	fi
+else
+	# older rmpp-preload: the UI library in /usr/lib
+	mount -o remount,rw /
+	mkdir -p /usr/lib/rmpp-hwr /usr/lib/rmpp-preload.d
+	cp librmpp-hwr-ui.so /usr/lib/rmpp-hwr/librmpp-hwr-ui.so.new
+	mv -f /usr/lib/rmpp-hwr/librmpp-hwr-ui.so.new /usr/lib/rmpp-hwr/librmpp-hwr-ui.so
+	ln -sf /usr/lib/rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp-preload.d/60-rmpp-hwr.so
+	sync
+	systemctl reset-failed xochitl 2>/dev/null || true
+	systemctl restart xochitl
+	sleep 3
+	mount -o remount,ro / || echo "warning: / is still read-write"
+fi
 echo "rmpp-hwr installed"
