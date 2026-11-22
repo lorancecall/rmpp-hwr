@@ -397,9 +397,22 @@ void recordInk(QPointer<QObject> scp, const QString &page, const QString &text, 
     });
 }
 
+// One full e-paper refresh (xochitl's own ghost buster, as rmpp-refresh does) after ms: the edit box and the
+// keyboard leave ghosting behind when they close.
+void fullRefreshLater(QPointer<QQuickItem> dvp, int ms) {
+    QTimer::singleShot(ms, qApp, [dvp] {
+        QObject *gb = dvp && dvp->isVisible() ? dvp->property("ghostBuster").value<QObject *>() : nullptr;
+        if (!gb || !QMetaObject::invokeMethod(gb, "userRequestedClear")) qWarning("[rmpp-hwr] no ghost buster");
+        else qWarning("[rmpp-hwr] full refresh");
+    });
+}
+
 // ---- adding ink: deselect/delete, add after the scene settles, select the new ink, redraw ----
+// The page is redrawn once: fullRefresh (after an edit: the box and the keyboard left ghosting) = one ghost-buster
+// refresh; otherwise one updateAfterStroke. Earlier versions redrew at 0, 300 and 1000 ms and the edit added a
+// full refresh on top: the developer saw the page flash several times (2026-11-22).
 void putInk(QPointer<QObject> scp, QPointer<QObject> php, QPointer<QQuickItem> dvp, int layer, bool deleteSelection,
-            const Placed &pl, const QString &text, int replaceIdx) {
+            const Placed &pl, const QString &text, int replaceIdx, bool fullRefresh = false) {
     // addDrawingLine is ignored while a selection is active
     if (deleteSelection) QMetaObject::invokeMethod(scp, "deleteSelectedItems", Q_ARG(int, layer));
     else QMetaObject::invokeMethod(scp, "clearSelectedItems");
@@ -410,10 +423,14 @@ void putInk(QPointer<QObject> scp, QPointer<QObject> php, QPointer<QQuickItem> d
             selectInk(scp, pl.strokes);
             recordInk(scp, dvp ? dvp->property("currentPageId").toString() : scp->property("pageId").toString(), text, pl, added, replaceIdx);
         }
-        // lines added this way are not drawn until the next redraw (updateAfterStroke is what the pen path calls);
-        // repeat once the lasso menu has closed, which repaints the old screen content
-        for (int ms : {0, 300, 1000})
-            QTimer::singleShot(ms, qApp, [dvp] { if (dvp) QMetaObject::invokeMethod(dvp, "updateAfterStroke"); });
+        // lines added this way are not drawn until the next redraw (updateAfterStroke is what the pen path calls).
+        // Once, after the new selection and its lasso menu have appeared (the menu repaints old screen content).
+        // After an edit the ghost-buster refresh follows right after it and clears the box's and keyboard's ghosting.
+        QTimer::singleShot(500, qApp, [dvp, fullRefresh] {
+            if (!dvp) return;
+            QMetaObject::invokeMethod(dvp, "updateAfterStroke");
+            if (fullRefresh) fullRefreshLater(dvp, 0);
+        });
         setStatus(added < 0 ? QStringLiteral("this xochitl version is not supported") : QString(), false);
     });
 }
@@ -562,6 +579,7 @@ public:
 void closeInkEdit() {
     if (g_edit.box) g_edit.box->deleteLater();
     g_edit.box = nullptr;
+    qApp->setProperty("rmppKeyboardRefresh", QVariant());
     if (QGuiApplication::inputMethod()) QGuiApplication::inputMethod()->hide();
 }
 
@@ -589,6 +607,9 @@ void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, c
     if (!o) { delete ctx; return; }
     ctx->setParent(o);
     g_edit = {o, sc, ph, dv, dv->property("currentPageId").toString(), rec, layer, em, maxW};
+    // rmpp-refresh does a full refresh once the keyboard has slid in; the edit box gets one only when it closes
+    // (finishInkEdit). rmpp-refresh 0.3.1+ reads this flag; older versions refresh anyway.
+    qApp->setProperty("rmppKeyboardRefresh", false);
 }
 
 // Called from the 1.5 s timer: the notebook was closed or the page turned while the edit box was open.
@@ -596,15 +617,6 @@ void closeStaleInkEdit() {
     if (!g_edit.box) return;
     if (!g_edit.dv || !g_edit.dv->isVisible() || !g_edit.sc || g_edit.dv->property("currentPageId").toString() != g_edit.page)
         closeInkEdit();
-}
-
-// One full e-paper refresh (xochitl's own ghost buster, as rmpp-refresh does) after ms: the edit box and the
-// keyboard leave ghosting behind when they close.
-void fullRefreshLater(QPointer<QQuickItem> dvp, int ms) {
-    QTimer::singleShot(ms, qApp, [dvp] {
-        QObject *gb = dvp && dvp->isVisible() ? dvp->property("ghostBuster").value<QObject *>() : nullptr;
-        if (!gb || !QMetaObject::invokeMethod(gb, "userRequestedClear")) qWarning("[rmpp-hwr] no ghost buster");
-    });
 }
 
 // Applies the edit; true when the ink is being redrawn (putInk).
@@ -637,16 +649,15 @@ bool applyInkEdit(const InkEdit &e) {
         return false;
     }
     qWarning("[rmpp-hwr] ink edit: %s", qPrintable(QString(text).replace(QLatin1Char('\n'), QLatin1String(" | "))));
-    putInk(e.sc, e.ph, e.dv, e.layer, true, pl, text, e.rec);
+    putInk(e.sc, e.ph, e.dv, e.layer, true, pl, text, e.rec, true);
     return true;
 }
 
 void finishInkEdit(bool ok) {
     const InkEdit e = g_edit;
     closeInkEdit();
-    const bool redraw = ok && applyInkEdit(e);
-    // once: after the keyboard has slid out, or after the new ink's last redraw (putInk: 400 ms + 1000 ms)
-    fullRefreshLater(e.dv, redraw ? 1800 : 700);
+    // one full refresh: putInk's after the edited ink is drawn, or here once the keyboard has slid out
+    if (!(ok && applyInkEdit(e))) fullRefreshLater(e.dv, 700);
 }
 
 const char *kBusyQml = R"QML(
