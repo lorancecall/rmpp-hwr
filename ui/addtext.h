@@ -112,7 +112,7 @@ void closeTypingMenu(QQuickItem *dv) {
 // T menu > Add text object: close the menu, then wait for the tap that places the text.
 void startAddTextObject() {
     if (g_state->value(QStringLiteral("busy")).toBool() || g_edit.box) return;
-    if (!loadGlyphs()) { setStatus(QStringLiteral("glyphs.json missing"), false); return; }
+    if (!glyphsAvailable()) { setStatus(QStringLiteral("no ink font installed"), false); return; }
     QQuickItem *dv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DocumentView_QMLTYPE") && i->isVisible(); });
     closeTypingMenu(dv);
     QQmlEngine *eng = dv ? qmlEngine(dv) : nullptr;
@@ -151,9 +151,11 @@ void placeTextObject(double x, double y) {
 // Characters of the edit box's text that the ink font has no strokes for (shown in the box, left out of the ink).
 void updateInkMissing(const QString &text) {
     QString missing;
-    if (loadGlyphs())
-        for (const QChar c : text)
-            if (!c.isSpace() && !g_glyphs.contains(c) && !missing.contains(c)) missing += c;
+    useGlyphLanguage(text);
+    for (const uint c : text.toUcs4()) {
+        const QString ch = QString::fromUcs4(reinterpret_cast<const char32_t *>(&c), 1);
+        if (!QChar::isSpace(c) && !glyphOf(char32_t(c)) && !missing.contains(ch)) missing += ch;
+    }
     if (g_state->value(QStringLiteral("inkMissing")).toString() != missing) g_state->insert(QStringLiteral("inkMissing"), missing);
 }
 

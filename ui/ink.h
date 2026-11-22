@@ -19,49 +19,12 @@ struct InkPt {
 #pragma pack(pop)
 static_assert(sizeof(InkPt) == 14, "Line point layout");
 
-struct Glyph {
-    double adv = 0.5;
-    QList<QList<QPointF>> strokes;
-};
-QHash<QChar, Glyph> g_glyphs;
-
-// glyphs.json (ink/glyphs.py build): {"glyphs": {char: {"adv", "strokes": [[x, y, ...]]}}}, em units, y down.
-QString g_glyphsFile;   // the file g_glyphs was loaded from
-
-QString glyphsFile() {
-    return QLatin1String(kLibDir) + QStringLiteral("/glyphs.json");
-}
-
-bool loadGlyphs() {
-    const QString file = glyphsFile();
-    if (!g_glyphs.isEmpty() && g_glyphsFile == file) return true;
-    g_glyphs.clear();
-    g_glyphsFile = file;
-    QFile f{file};
-    if (!f.open(QIODevice::ReadOnly)) return false;
-    const QJsonObject gs = QJsonDocument::fromJson(f.readAll()).object().value(QStringLiteral("glyphs")).toObject();
-    for (auto it = gs.begin(); it != gs.end(); ++it) {
-        if (it.key().size() != 1) continue;
-        const QJsonObject o = it.value().toObject();
-        Glyph g;
-        g.adv = o.value(QStringLiteral("adv")).toDouble(0.5);
-        for (const QJsonValue &s : o.value(QStringLiteral("strokes")).toArray()) {
-            const QJsonArray a = s.toArray();
-            QList<QPointF> p;
-            for (int i = 0; i + 1 < a.size(); i += 2) p.append(QPointF(a[i].toDouble(), a[i + 1].toDouble()));
-            g.strokes.append(p);
-        }
-        g_glyphs.insert(it.key().at(0), g);
-    }
-    return !g_glyphs.isEmpty();
-}
-
 // One line of text in em units (x from 0, y 0 = top of the em box). Returns the width in em.
 double layoutLine(const QString &text, QList<QList<QPointF>> *out) {
     double x = 0;
-    for (const QChar c : text) {
-        auto it = g_glyphs.constFind(c);
-        if (it == g_glyphs.constEnd()) { x += 0.5; continue; }
+    for (const uint c : text.toUcs4()) {
+        const Glyph *it = glyphOf(char32_t(c));
+        if (!it) { x += 0.5; continue; }
         for (const auto &s : it->strokes) {
             QList<QPointF> p;
             for (const QPointF &q : s) p.append(QPointF(q.x() + x, q.y()));
@@ -253,6 +216,9 @@ void appendLine(Placed *out, const QString &text, const QPointF &origin, double 
 // the original line (replace) or stacked below the selection.
 Placed placeLines(const QStringList &lines, const QRectF &sel, bool replace) {
     Placed out;
+    QString all;
+    for (const QString &l : lines) all += l.section(QLatin1Char('\t'), 1);
+    useGlyphLanguage(all);
     double yNext = sel.bottom() + 20;
     for (const QString &l : lines) {
         const QStringList box = l.section(QLatin1Char('\t'), 0, 0).split(QLatin1Char(' '));
@@ -305,6 +271,7 @@ QStringList wrapParagraph(const QString &para, double maxEm) {
 // Text (paragraphs separated by '\n') at one em size, wrapped at maxWidth (page units, 0 = no wrap), lines 1.15 em
 // apart.
 Placed placeText(const QString &text, const QPointF &origin, double em, double maxWidth) {
+    useGlyphLanguage(text);
     Placed out;
     out.origin = origin;
     out.em = em;
@@ -344,7 +311,7 @@ void selectInk(QObject *sc, const QList<QList<QPointF>> &strokes) {
 // ---- records of converted ink (ink.json): what lets "edit text" find the text of a selection ----
 // [{"page", "text", "n" (strokes), "w", "h" (selection bounds), "ox", "oy" (em origin relative to the bounds' top-left),
 //   "em"}]. A selection is ours when it has the same number of strokes and the same size, wherever it was moved.
-QString inkRecordsPath() { return QLatin1String(kLibDir) + QStringLiteral("/ink.json"); }
+QString inkRecordsPath() { return QLatin1String(kDataDir) + QStringLiteral("/ink.json"); }
 
 QJsonArray readInkRecords() {
     QFile f(inkRecordsPath());
@@ -579,7 +546,7 @@ public:
         QImage img(sz, QImage::Format_ARGB32);
         img.fill(Qt::white);
         if (size) *size = sz;
-        if (!loadGlyphs()) return img;
+        if (!glyphsAvailable()) return img;
         const double scale = qBound(50, g_state->value(QStringLiteral("inkSize")).toInt(), 200) / 100.0;
         const int weight = qBound(0, g_state->value(QStringLiteral("inkWeight")).toInt(), 2);
         const double em = g_edit.em * scale;
@@ -864,7 +831,7 @@ void convertSelectionToInk(bool replace, bool editOnly = false, bool toText = fa
     const int layer = sc->property("currentLayer").toInt();
     const QRectF sel = selectionRect(sc, layer);
     if (sel.isEmpty()) { setStatus(QStringLiteral("select handwriting with the lasso first"), false); return; }
-    if (!toText && !loadGlyphs()) { setStatus(QStringLiteral("glyphs.json missing"), false); return; }
+    if (!toText && !glyphsAvailable()) { setStatus(QStringLiteral("no ink font installed"), false); return; }
     const QString pageId = dv->property("currentPageId").toString();
     const QJsonArray recs = readInkRecords();
     const int rec = findInkRecord(recs, pageId, sc->property("selectionItemCount").toInt(), sel);

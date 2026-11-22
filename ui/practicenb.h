@@ -12,8 +12,12 @@
 // The list: every registry sidecar whose notebook still exists, with the pages written so far (a page with at least
 // one stroke). A sidecar whose notebook was deleted is dropped.
 
-QString practiceDir() { return QLatin1String(kLibDir) + QStringLiteral("/practice"); }
-QString textsDir() { return QLatin1String(kLibDir) + QStringLiteral("/texts"); }
+QString practiceDir() { return QLatin1String(kDataDir) + QStringLiteral("/practice"); }
+// Practice texts: the package's, else the data dir's (release installs)
+QString textsDir() {
+    const QString p = QLatin1String(kPkgDir) + QStringLiteral("/texts");
+    return QFileInfo::exists(p) ? p : QLatin1String(kDataDir) + QStringLiteral("/texts");
+}
 
 QJsonObject readJsonFile(const QString &path) {
     QFile f(path);
