@@ -13,22 +13,25 @@ It starts with Korean, English and digits, and grows with the reMarkable communi
 write on the tablet, `hwr contribute` shares your practice pages to it (anonymized, CC BY 4.0), and the public
 models are trained on it regularly. Every language that gathers writers there can be recognized here next.
 
-On the tablet:
+On the tablet (Settings > Handwriting: switch the converter from reMarkable to rmpp-hwr; reMarkable's own convert
+stays the default):
 
-- **Convert to ink** (lasso menu): select handwriting with the lasso and tap the convert button (the "aa" icon in a
-  dashed box). The recognized text is written below the selection as ordinary pen strokes (Fineliner, clean
-  Noto Sans KR glyphs), already selected so you can move or resize it at once. Double tap it (or tap the button
-  again) to **edit the text** in a keyboard box (Korean works with rmpp-korean); OK redraws it in place, wrapped at
-  its width. Settings > Handwriting switches the lasso button back to reMarkable's own Convert to text.
-- **Convert page** (toolbar, next to Convert to text): recognizes the whole page and types it on a new page.
-- **Models** (Settings > Handwriting): pick the recognition model. The deployed model is `rec.onnx`/`dict.txt`/
-  `model.txt` in `/home/root/.local/share/rmpp-hwr/`; more models go in `models/<name>/` with the same three files
-  and are listed by the first line of their `model.txt`. "Off" turns rmpp-hwr's recognizer off: the lasso button is
-  reMarkable's own Convert to text and Convert page is hidden.
+- **Convert with the lasso**: select handwriting and tap Convert. By default the text is typed into the page's text
+  on the line where you wrote it; Settings > Handwriting > Convert can delete the ink first, or make a **text
+  object** instead: the text as clean pen strokes (Noto Sans KR glyphs) that you can move and resize like ink.
+  Double tap a text object to **edit the text** in a keyboard box (Korean and other languages via
+  [rmpp-lang](https://github.com/lorancecall/rmpp-lang)); closing the box redraws it in place, wrapped at its width.
+- **Convert page** (toolbar): recognizes the whole page and adds the text as a new page (or, if you choose, replaces
+  the page's ink with typed text line by line).
+- **Languages and models** (Settings > Handwriting > Language): the release brings the Korean model (Korean, English,
+  digits) and base packs for Chinese, Japanese, English and Latin-script languages (official PaddleOCR PP-OCRv5
+  models converted to ONNX, Apache-2.0). Pick a language, then a model; models can be deleted there too.
+- **Collect training data** (Settings > Handwriting): keeps your conversions and corrections so a model can be
+  trained on your own handwriting.
 
-> Status: experimental. rmpp-hwr is installed and updated with its own PC tool (`hwr install`), not as a Vellum
-> package, because models change often. It only needs `rmpp-preload` from
-> [rmpp-packages](https://github.com/lorancecall/rmpp-packages) on the tablet.
+> Status: experimental. rmpp-hwr is not a Vellum package, because models change often: install it with the
+> [rmpp installer](https://github.com/lorancecall/rmpp-packages) (it downloads the latest release, ~80 MB in /home)
+> or with its own PC tool (`hwr install`, below). It only needs `rmpp-preload` from rmpp-packages on the tablet.
 
 ## What is here
 
