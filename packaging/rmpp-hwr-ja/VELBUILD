@@ -1,0 +1,27 @@
+maintainer="lorancecall <84116812+lorancecall@users.noreply.github.com>"
+pkgname=rmpp-hwr-ja
+pkgver=0.4.0
+pkgrel=0
+upstream_author="lorancecall"
+category="ui"
+pkgdesc="Japanese (PaddleOCR PP-OCRv5 base) handwriting model for rmpp-hwr"
+url="https://github.com/lorancecall/rmpp-hwr"
+arch="noarch"
+license="Apache-2.0"
+depends="rmpp-hwr"
+source="
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/pack-rmpp-hwr-japanese-base.tar
+"
+options="!check !fhs !strip"
+
+# Model files only: rmpp-hwr lists every /home/root/.vellum/share/rmpp-hwr-*/pack.json as a model (not deletable
+# in its UI: `vellum del $pkgname`). Read at run time, so no xochitl restart and no root file system change.
+# Attributions: rmpp-hwr's NOTICE (/home/root/.vellum/licenses/rmpp-hwr/NOTICE)
+
+package() {
+	mkdir -p "$pkgdir"/home/root/.vellum/share/$pkgname
+	cp -r "$srcdir"/rmpp-hwr-japanese-base/. "$pkgdir"/home/root/.vellum/share/$pkgname/
+}
+sha512sums="
+dc25f3def091919423c4915a2f5755a718ab1d4ff67d511bc6a9c8ac991608a6e160b8a31e790fe174a6cdac2ceeb63098e3c7a092ddd0ff1344d4dc58a1c845  pack-rmpp-hwr-japanese-base.tar
+"

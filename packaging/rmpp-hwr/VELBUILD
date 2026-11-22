@@ -1,0 +1,115 @@
+maintainer="lorancecall <84116812+lorancecall@users.noreply.github.com>"
+pkgname=rmpp-hwr
+pkgver=0.4.0
+pkgrel=1
+upstream_author="lorancecall"
+category="ui"
+pkgdesc="Handwriting recognition (beta): lasso to typed text or a text object, Convert page; models are rmpp-hwr-<lang>"
+url="https://github.com/lorancecall/rmpp-hwr"
+arch="aarch64"
+license="GPL-3.0-only AND MIT"
+# lasso -> text object goes through rmpp-textobj; models: rmpp-hwr-ko (Korean), -zh, -ja, -en, -latin
+depends="rmpp-preload>=0.2.0 rmpp-textobj>=0.1.0 mount-utils remarkable-os>=3.29 remarkable-os<3.30"
+source="
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/librmpp-hwr-ui.so
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/librmpp_hwr.so
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/libonnxruntime.so
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/texts.tar
+https://raw.githubusercontent.com/$upstream_author/rmpp-hwr/v$pkgver/LICENSE
+https://raw.githubusercontent.com/$upstream_author/rmpp-hwr/v$pkgver/NOTICE
+"
+options="!check !fhs !strip"
+
+# Each lifecycle function runs as its own script: no shared helpers, every step is written out.
+# Never `systemctl stop xochitl`: that powers the tablet off. Scripts never restart xochitl themselves: they re-arm
+# the transient timer rmpp-restart-xochitl (15 s, runs /usr/lib/rmpp/restart), so a transaction restarts it once.
+# Root file system: the UI library goes to /usr/lib/rmpp/rmpp-hwr with a link in preload.d (60); a library xochitl
+# may have loaded is renamed to *.old or moved to /usr/lib/rmpp/.trash, never deleted. Plain
+# `mount -o remount,rw|ro /`: Vellum's mount-rw drops /etc/dropbear.
+# Engine, onnxruntime and practice texts stay in /home/root/.vellum/share/rmpp-hwr (the UI looks there first, then
+# in /home/root/.local/share/rmpp-hwr for `hwr install` copies). User data in /home/root/.local/share/rmpp-hwr
+# (records, practice, user models) is never touched, except the program copies an older release install left there.
+
+package() {
+	install -Dm755 "$srcdir"/librmpp-hwr-ui.so "$pkgdir"/home/root/.vellum/share/rmpp-hwr/librmpp-hwr-ui.so
+	install -Dm755 "$srcdir"/librmpp_hwr.so "$pkgdir"/home/root/.vellum/share/rmpp-hwr/librmpp_hwr.so
+	install -Dm755 "$srcdir"/libonnxruntime.so "$pkgdir"/home/root/.vellum/share/rmpp-hwr/libonnxruntime.so
+	mkdir -p "$pkgdir"/home/root/.vellum/share/rmpp-hwr/texts
+	tar -xf "$srcdir"/texts.tar -C "$pkgdir"/home/root/.vellum/share/rmpp-hwr/texts
+	install -Dm644 "$srcdir"/LICENSE "$pkgdir"/home/root/.vellum/licenses/$pkgname/LICENSE
+	install -Dm644 "$srcdir"/NOTICE "$pkgdir"/home/root/.vellum/licenses/$pkgname/NOTICE
+	echo "https://github.com/$upstream_author/rmpp-hwr" > \
+		"$pkgdir"/home/root/.vellum/licenses/$pkgname/SOURCES
+}
+
+postinstall() {
+	# a release install (rmpp-install.sh) left program copies in the data folder: the package's copies win anyway,
+	# so drop the engine and onnxruntime (~26 MB) and the old glyphs; models and user data stay
+	rm -f /home/root/.local/share/rmpp-hwr/librmpp_hwr.so /home/root/.local/share/rmpp-hwr/libonnxruntime.so /home/root/.local/share/rmpp-hwr/glyphs.json
+	mount -o remount,rw /
+	mkdir -p /usr/lib/rmpp/rmpp-hwr /usr/lib/rmpp/preload.d
+	cp /home/root/.vellum/share/rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.new && chmod 755 /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.new && { [ ! -e /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so ] || mv -f /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.old; } && mv -f /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.new /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so
+	ln -sfn ../rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp/preload.d/60-rmpp-hwr.so
+	# older release installs: /usr/lib/rmpp-hwr + /usr/lib/rmpp-preload.d link (deleted after the restart)
+	if [ -e /usr/lib/rmpp-hwr ] || [ -L /usr/lib/rmpp-preload.d/60-rmpp-hwr.so ]; then
+		mkdir -p /usr/lib/rmpp/.trash
+		rm -f /usr/lib/rmpp-preload.d/60-rmpp-hwr.so
+		[ ! -e /usr/lib/rmpp-hwr ] || mv /usr/lib/rmpp-hwr /usr/lib/rmpp/.trash/usr_lib_rmpp-hwr.$$
+	fi
+	sync
+	mount -o remount,ro / || echo "note: / stays read-write until xochitl restarts"
+	# one xochitl restart per Vellum transaction: (re)arm the timer, so the last package script wins
+	systemctl stop rmpp-restart-xochitl.timer 2>/dev/null || true
+	systemd-run --quiet --unit=rmpp-restart-xochitl --on-active=15 --timer-property=AccuracySec=1s \
+		/bin/sh -c '[ -x /usr/lib/rmpp/restart ] && exec /usr/lib/rmpp/restart; systemctl reset-failed xochitl; systemctl restart xochitl' || \
+		{ systemctl reset-failed xochitl 2>/dev/null || true; systemctl restart xochitl; }
+}
+
+postupgrade() {
+	mount -o remount,rw /
+	mkdir -p /usr/lib/rmpp/rmpp-hwr /usr/lib/rmpp/preload.d
+	cp /home/root/.vellum/share/rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.new && chmod 755 /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.new && { [ ! -e /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so ] || mv -f /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.old; } && mv -f /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.new /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so
+	ln -sfn ../rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp/preload.d/60-rmpp-hwr.so
+	sync
+	mount -o remount,ro / || echo "note: / stays read-write until xochitl restarts"
+	# one xochitl restart per Vellum transaction: (re)arm the timer, so the last package script wins
+	systemctl stop rmpp-restart-xochitl.timer 2>/dev/null || true
+	systemd-run --quiet --unit=rmpp-restart-xochitl --on-active=15 --timer-property=AccuracySec=1s \
+		/bin/sh -c '[ -x /usr/lib/rmpp/restart ] && exec /usr/lib/rmpp/restart; systemctl reset-failed xochitl; systemctl restart xochitl' || \
+		{ systemctl reset-failed xochitl 2>/dev/null || true; systemctl restart xochitl; }
+}
+
+# `vellum reenable` after an OS update: the root file system is already writable here; rmpp-preload's
+# postosupgrade restarts xochitl.
+postosupgrade() {
+	mkdir -p /usr/lib/rmpp/rmpp-hwr /usr/lib/rmpp/preload.d
+	cp /home/root/.vellum/share/rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.new && chmod 755 /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.new && { [ ! -e /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so ] || mv -f /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.old; } && mv -f /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so.new /usr/lib/rmpp/rmpp-hwr/librmpp-hwr-ui.so
+	ln -sfn ../rmpp-hwr/librmpp-hwr-ui.so /usr/lib/rmpp/preload.d/60-rmpp-hwr.so
+	sync
+}
+
+predeinstall() {
+	mount -o remount,rw /
+	mkdir -p /usr/lib/rmpp/.trash
+	rm -f /usr/lib/rmpp/preload.d/60-rmpp-hwr.so
+	[ ! -e /usr/lib/rmpp/rmpp-hwr ] || mv /usr/lib/rmpp/rmpp-hwr /usr/lib/rmpp/.trash/rmpp-hwr.$$
+	sync
+	mount -o remount,ro / || echo "note: / stays read-write until xochitl restarts"
+	# one xochitl restart per Vellum transaction: (re)arm the timer, so the last package script wins
+	systemctl stop rmpp-restart-xochitl.timer 2>/dev/null || true
+	systemd-run --quiet --unit=rmpp-restart-xochitl --on-active=15 --timer-property=AccuracySec=1s \
+		/bin/sh -c '[ -x /usr/lib/rmpp/restart ] && exec /usr/lib/rmpp/restart; systemctl reset-failed xochitl; systemctl restart xochitl' || \
+		{ systemctl reset-failed xochitl 2>/dev/null || true; systemctl restart xochitl; }
+	# `vellum purge` (rmpp setup: "Also delete their settings and data"): settings and data in /home too
+	if [ "$VELLUM_PURGE" = "1" ]; then
+		rm -rf /home/root/.config/rmpp-hwr /home/root/.local/share/rmpp-hwr
+	fi
+}
+sha512sums="
+e09d7d7da57daa1746cc037e9e9599abc87a18086dfff1e735759fdf84654a3a14d44285e74b52928aaab7fa670a1899e46d1819f17ccaf701bc49e71469d34c  librmpp-hwr-ui.so
+9ebf84c4e83986dcb0a1ecc6c6a86f9f9c1e0744ec59269e29443cc62314fc31b6fa3e409902b75a1c9fbd480bb4892a202c68833e4e73b345c24448651bfcf9  librmpp_hwr.so
+34300735f431eb39c460d24875bc5f822bdae26c6fdbad91669e6f3650e855fd208416d1a81145808b0e42f01bad079a9beff62ec1b9b497ad42140d740bca3d  libonnxruntime.so
+76f12322ae6bf2bfee3d72c7918e4cdc02eae7ae9bdd7d9ca3bef465a0c3d074df4f3dbde5dcb3c66605bf403a85bb461efa645ad749477b6abd4efc6d1e1ef7  texts.tar
+900ef9b1d0e1435fb3aad32f035edf8890538292ebb3104af2feb386fb25df134ed0172a0ec542b2c25ff69a39ae62b34ad17e01b3522067a7328abb25aa4fff  LICENSE
+7663373bcfab9c3949b8fd6950d1540c30e424d85571da6f0b7142d0bdc5fc824bde3be557c410a67abcd4f826059663bc946f03d3886487d3ecd53998c19d82  NOTICE
+"

@@ -1,0 +1,27 @@
+maintainer="lorancecall <84116812+lorancecall@users.noreply.github.com>"
+pkgname=rmpp-hwr-latin
+pkgver=0.4.0
+pkgrel=0
+upstream_author="lorancecall"
+category="ui"
+pkgdesc="Latin-script (PaddleOCR PP-OCRv5 base) handwriting model for rmpp-hwr"
+url="https://github.com/lorancecall/rmpp-hwr"
+arch="noarch"
+license="Apache-2.0"
+depends="rmpp-hwr"
+source="
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/pack-rmpp-hwr-latin-base.tar
+"
+options="!check !fhs !strip"
+
+# Model files only: rmpp-hwr lists every /home/root/.vellum/share/rmpp-hwr-*/pack.json as a model (not deletable
+# in its UI: `vellum del $pkgname`). Read at run time, so no xochitl restart and no root file system change.
+# Attributions: rmpp-hwr's NOTICE (/home/root/.vellum/licenses/rmpp-hwr/NOTICE)
+
+package() {
+	mkdir -p "$pkgdir"/home/root/.vellum/share/$pkgname
+	cp -r "$srcdir"/rmpp-hwr-latin-base/. "$pkgdir"/home/root/.vellum/share/$pkgname/
+}
+sha512sums="
+ab2363b8bd3856678e7bc594c0755857411c2a7b70e62a8f1fd089d1b2ac2eebe49f6be2c219b096fead6ce54134f37ca8dcf31c9ec3b65a74a853c96a372720  pack-rmpp-hwr-latin-base.tar
+"

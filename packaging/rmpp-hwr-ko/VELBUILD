@@ -1,0 +1,38 @@
+maintainer="lorancecall <84116812+lorancecall@users.noreply.github.com>"
+pkgname=rmpp-hwr-ko
+pkgver=0.4.0
+pkgrel=0
+upstream_author="lorancecall"
+category="ui"
+pkgdesc="Korean handwriting model for rmpp-hwr (PP-OCRv5 fine-tuned on handwriting)"
+url="https://github.com/lorancecall/rmpp-hwr"
+arch="noarch"
+license="CC-BY-SA-4.0 AND Apache-2.0"
+depends="rmpp-hwr"
+source="
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/rec.onnx
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/dict.txt
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/model.txt
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/pack.json
+https://github.com/$upstream_author/rmpp-hwr/releases/download/v$pkgver/MODEL_CARD.md
+"
+options="!check !fhs !strip"
+
+# Model files only: rmpp-hwr lists every /home/root/.vellum/share/rmpp-hwr-*/pack.json as a model (not deletable
+# in its UI: `vellum del $pkgname`). Read at run time, so no xochitl restart and no root file system change.
+# Training data, attributions and license: MODEL_CARD.md; base model: rmpp-hwr's NOTICE.
+
+package() {
+	install -Dm644 "$srcdir"/rec.onnx "$pkgdir"/home/root/.vellum/share/$pkgname/rec.onnx
+	install -Dm644 "$srcdir"/dict.txt "$pkgdir"/home/root/.vellum/share/$pkgname/dict.txt
+	install -Dm644 "$srcdir"/model.txt "$pkgdir"/home/root/.vellum/share/$pkgname/model.txt
+	install -Dm644 "$srcdir"/pack.json "$pkgdir"/home/root/.vellum/share/$pkgname/pack.json
+	install -Dm644 "$srcdir"/MODEL_CARD.md "$pkgdir"/home/root/.vellum/licenses/$pkgname/MODEL_CARD.md
+}
+sha512sums="
+7bdfcd895a8109d5571c36ca0d6696933bbd9152f71026c6fb28477c9e6556f8c781d106294102729900d4d4b29d9a5914f8236910254c174e00d4b4e2bd6f8e  rec.onnx
+c3c6a332ec39e64e105c3533f585ed8ec5a719a6b26e0360f4188e03136b11fb78696516f05dc96dd7d51248b66a3db89ca29e19c52160767efe62e374464485  dict.txt
+d9183bbdb012921a49c76551929afe51b6ff54ca861a1528044c2ebfdc981fdb80f3e078d4a1c9ccdce6b2bcbb784124124aa78bf1b721a94891d7fa265a4d96  model.txt
+b364c01fb2351a0c178beb8ad753047368f8ecc56c71eb5f2163e2f8ed58d17e10abdb42805e5994f3a40243ea43431c3387883846792c598ee4b1b5ee304292  pack.json
+0d7ba52d8dd8a6b29add92ab752ed2191cf47f4c72fc72265283e50cb5b2090a62bc61d89f95f7f7cf0312f5b5fd9d07d0cc1f6f5c186f89e2ce4f2e982928a6  MODEL_CARD.md
+"
