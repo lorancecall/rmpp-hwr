@@ -1,53 +1,61 @@
-# Installing rmpp-hwr: other ways and removal
+# Installing rmpp-hwr
 
-The usual way is **rmpp setup** (see the README's [Install](../README.md#install)). This page is for Vellum on the
-command line, the release files, and building and installing it yourself.
+The usual way is **rmpp setup** from [rmpp-packages](https://github.com/lorancecall/rmpp-packages#install), as the
+desktop app or the script: tick **Handwriting recognition (beta)**. This page covers the rest. Steps that are the
+same for every rmpp add-on live in rmpp-packages and are linked here, not repeated.
 
 ## Packages
 
-| Package | What |
+| Package | Installs with it |
 |---|---|
-| `rmpp-hwr` | the add-on: lasso convert, Convert page, Settings > Handwriting, the recognizer and onnxruntime (needs `rmpp-preload`; brings `rmpp-textobj`) |
-| `rmpp-hwr-ko` | Korean model (the one trained on [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db)) |
-| `rmpp-hwr-zh`, `rmpp-hwr-ja`, `rmpp-hwr-en`, `rmpp-hwr-latin` | base models of other languages |
+| `rmpp-hwr` (lasso convert, Convert page, Settings > Handwriting, the recognizer) | `rmpp-hwr-ko`, `rmpp-textobj`, `rmpp-lang`, `rmpp-preload` |
+| `rmpp-hwr-ko` (Korean model, trained on [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db)) | `rmpp-hwr` |
+| `rmpp-hwr-zh`, `rmpp-hwr-ja`, `rmpp-hwr-en`, `rmpp-hwr-latin` (base models of other languages) | `rmpp-hwr` |
+| `rmpp-textobj` (text objects, used for text object mode) | `rmpp-lang`, `rmpp-preload` |
 
-Text object mode (recognized handwriting drawn as a movable, editable text object) uses
-[rmpp-textobj](https://github.com/lorancecall/rmpp-textobj), which comes with `rmpp-hwr` (a dependency), and the
-language's add-on of [rmpp-lang](https://github.com/lorancecall/rmpp-lang) (its glyphs).
+Dependencies are installed automatically, in rmpp setup and with `vellum add`. In rmpp setup the other languages'
+models are listed under Handwriting recognition. All packages and what needs what:
+[packages.md](https://github.com/lorancecall/rmpp-packages/blob/main/docs/packages.md).
 
-Files: the packages put theirs under `/home/root/.vellum/share/<package>/`; the add-on's UI library goes to
-`/usr/lib/rmpp/rmpp-hwr/` and is loaded through `/usr/lib/rmpp/preload.d/60-rmpp-hwr.so`. Your own data (records,
-practice pages, models you trained) stays in `/home/root/.local/share/rmpp-hwr/`: no package writes or deletes
-there.
+## Without rmpp setup
 
-## With Vellum on the command line
-
-On the tablet (SSH, developer mode), if Vellum is not there yet:
+Follow [manual-install.md](https://github.com/lorancecall/rmpp-packages/blob/main/docs/manual-install.md) (Vellum and
+the rmpp package repository), then on the tablet:
 
 ```sh
-wget -qO- https://lorancecall.github.io/rmpp-packages/install.sh | sh
+vellum add rmpp-hwr            # with rmpp-hwr-ko, rmpp-textobj, rmpp-lang, rmpp-preload
+vellum add rmpp-hwr-en         # other languages' models as you like: rmpp-hwr-zh, -ja, -latin
 ```
 
-Then:
+Older ways, for developers and old installs:
 
-```sh
-vellum add rmpp-hwr rmpp-hwr-ko          # rmpp-textobj comes with rmpp-hwr; other models as you like: rmpp-hwr-en ...
-vellum upgrade                           # later: updates
-vellum reenable                          # after a reMarkable OS update
-```
+- **`hwr install`** from a clone of this repository (your own models, development builds): see
+  [Build and install by hand](#build-and-install-by-hand).
+- **Release files** (how rmpp setup installed rmpp-hwr up to 0.3): the GitHub releases carry the files and
+  `rmpp-install.sh`; copy all assets of a release into one folder on the tablet and run `sh rmpp-install.sh` there
+  as root. Installing the packages moves the files of such an install aside.
 
-## From the release files
+## Uninstall
 
-Up to 0.3 rmpp-hwr was installed from its GitHub release: rmpp setup copied the release assets into one folder on
-the tablet and ran `rmpp-install.sh` there as root (Korean model to `/home/root/.local/share/rmpp-hwr/`, other
-languages as `pack-*.tar`). The script is still in the repository and in the releases, for an install by hand:
-copy all assets of a release into one folder on the tablet and run `sh rmpp-install.sh` there. Packages are the
-way from 0.4 on; installing them moves the release install's files aside.
+- **Just this add-on:** untick it in rmpp setup and press **Remove unticked installed**, or
+  `vellum del rmpp-hwr rmpp-hwr-ko` (and any other model packages). `rmpp-textobj`, `rmpp-lang` and `rmpp-preload`
+  stay while other add-ons use them; remove them the same way if nothing else does.
+- **What stays:** your data in `/home/root/.local/share/rmpp-hwr/` (conversion records, practice pages, models you
+  trained) and the settings in `/home/root/.config/rmpp-hwr/`. Text objects already on your pages stay as pen
+  strokes, with their records in `/home/root/.local/share/rmpp-textobj/objects.json`. Delete these by hand to start
+  fresh, or use step 3 of [uninstall.md](https://github.com/lorancecall/rmpp-packages/blob/main/docs/uninstall.md).
+- **A `hwr install`:** `tools/hwr uninstall` (`--purge` also deletes the data folder).
+- **Everything rmpp, and before a factory reset:** [uninstall.md](https://github.com/lorancecall/rmpp-packages/blob/main/docs/uninstall.md).
+
+## Next to other mods
+
+It runs next to xovi and other Vellum packages: [how-it-works.md](https://github.com/lorancecall/rmpp-packages/blob/main/docs/how-it-works.md#next-to-other-mods).
+reMarkable's own Convert to text stays available: Settings > Handwriting switches the lasso button back to it.
 
 ## Build and install by hand
 
-Requirements: reMarkable Paper Pro with developer mode and SSH (an `ssh rmpp` alias with a key), OS 3.29, and
-`rmpp-preload` on the tablet. On the PC:
+For development and your own models. Requirements: developer mode and SSH (an `ssh rmpp` alias with a key), and the
+packages installed (above, or rmpp setup). On the PC:
 
 ```sh
 git clone https://github.com/lorancecall/rmpp-hwr && cd rmpp-hwr
@@ -57,19 +65,16 @@ tools/hwr install                 # UI add-on + recognizer + model onto the tabl
 ```
 
 `hwr install` keeps a model that is already on the tablet (pass `--model DIR` to replace it); a model you trained
-yourself goes to `models/<name>/` and is listed in Settings > Handwriting. `hwr uninstall [--purge]` removes a
-`hwr install`.
+yourself goes to `models/<name>/` and is listed in Settings > Handwriting.
 
 Building needs the Arm GNU aarch64 toolchain, Qt 6.10 headers/device libraries and onnxruntime for linux-aarch64 in
 `../sdk` (see `.cargo/config.toml` and `ui/build.sh`): `./build.sh` (or `ui/build.sh` and
-`cargo build --release --target aarch64-unknown-linux-gnu`).
+`cargo build --release --target aarch64-unknown-linux-gnu`). Training and the code: [develop.md](develop.md).
 
-Restarting xochitl after copying files by hand: `systemctl reset-failed xochitl` first, then
-`systemctl restart xochitl`. Never `systemctl stop xochitl` (the screen stays blank until the next restart).
+The package recipes (VELBUILD) are in
+[rmpp-packages/packages](https://github.com/lorancecall/rmpp-packages/tree/main/packages); the next `vellum upgrade`
+or reinstall puts the released files back.
 
-## Removal
-
-- Packages: `vellum del rmpp-hwr` (and the model packages, e.g. `vellum del rmpp-hwr-ko`). Your data in
-  `/home/root/.local/share/rmpp-hwr/` stays; delete that folder to remove it too.
-- Everything the rmpp add-ons installed: **Remove everything** in rmpp setup.
-- A `hwr install`: `tools/hwr uninstall` (`--purge` also deletes the data folder).
+On the tablet, never run `systemctl stop xochitl` (it powers the tablet off); run `systemctl reset-failed xochitl`
+before `systemctl restart xochitl` (repeated restarts otherwise hit systemd's limit). The root file system is
+read-only: `mount -o remount,rw /` before changing files under `/usr/lib/rmpp`, `mount -o remount,ro /` after.

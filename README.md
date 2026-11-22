@@ -29,10 +29,12 @@ Tested on reMarkable Paper Pro, OS 3.29.1.
 Start at **[rmpp-packages](https://github.com/lorancecall/rmpp-packages#install)**: it explains developer mode and
 has **rmpp setup**, the installer for all rmpp add-ons.
 
-- In rmpp setup, tick **Handwriting recognition (beta)** (rmpp-hwr; not selected by default; the Korean model and
-  rmpp-textobj come with it). The other languages' models are listed under it.
+- In rmpp setup (the desktop app or the script), tick **Handwriting recognition (beta)** (rmpp-hwr; not selected by
+  default). The other languages' models are listed under it.
+- It installs the Korean model `rmpp-hwr-ko`, `rmpp-textobj`, `rmpp-lang` and `rmpp-preload` with it
+  ([all packages and dependencies](https://github.com/lorancecall/rmpp-packages/blob/main/docs/packages.md)).
 - After a reMarkable OS update: **Restore** in rmpp setup.
-- Other ways and removal: [docs/install.md](docs/install.md).
+- Without rmpp setup, removing it, next to other mods, building it: [docs/install.md](docs/install.md).
 
 ## Use
 
