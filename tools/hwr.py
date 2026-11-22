@@ -45,7 +45,7 @@ import uuid
 from pathlib import Path
 
 DEV = Path(__file__).resolve().parents[2]                 # rmpp-dev
-HWR = DEV / "rmpp-hwr"
+HWR = Path(__file__).resolve().parents[1]                 # this checkout (also a second clone or worktree)
 DATA = Path(os.environ.get("HWR_DATA", DEV / "hwr-data"))
 COLLECTED = DATA / "collected"
 OUT = DEV / "hwr-train" / "out"
