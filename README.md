@@ -13,6 +13,12 @@ It starts with Korean, English and digits, and grows with the reMarkable communi
 write on the tablet, `hwr contribute` shares your practice pages to it (anonymized, CC BY 4.0), and the public
 models are trained on it regularly. Every language that gathers writers there can be recognized here next.
 
+> Part of the **rmpp add-ons**, built on [rmpp-packages](https://github.com/lorancecall/rmpp-packages): it is
+> installed by rmpp setup, loaded into xochitl at every boot by rmpp-preload (no xovi), and kept up to date with
+> Vellum. How that differs from xovi: [how it works](https://github.com/lorancecall/rmpp-packages/blob/main/docs/how-it-works.md).
+>
+> Status: experimental.
+
 On the tablet:
 
 - **Lasso convert** (lasso menu): select handwriting with the lasso and tap the convert button (the "aa" icon in a
@@ -22,14 +28,21 @@ On the tablet:
   the selection are not recognized again: their text is used as it is. Settings > Handwriting switches the lasso
   button back to reMarkable's own Convert to text.
 - **Convert page** (toolbar, next to Convert to text): recognizes the whole page and types it on a new page.
-- **Models** (Settings > Handwriting): pick the recognition model. The deployed model is `rec.onnx`/`dict.txt`/
-  `model.txt` in `/home/root/.local/share/rmpp-hwr/`; more models go in `models/<name>/` with the same three files
-  and are listed by the first line of their `model.txt`. "Off" turns rmpp-hwr's recognizer off: the lasso button is
-  reMarkable's own Convert to text and Convert page is hidden.
+- **Models** (Settings > Handwriting): pick the recognition model. The models of the installed packages
+  (`rmpp-hwr-ko`, `rmpp-hwr-en`, ...) are listed, and models you trained yourself in
+  `/home/root/.local/share/rmpp-hwr/models/<name>/` (`rec.onnx`, `dict.txt`, `model.txt`; listed by the first line of
+  `model.txt`). "Off" turns rmpp-hwr's recognizer off: the lasso button is reMarkable's own Convert to text and
+  Convert page is hidden.
 
-> Status: experimental. rmpp-hwr is installed and updated with its own PC tool (`hwr install`), not as a Vellum
-> package, because models change often. It only needs `rmpp-preload` from
-> [rmpp-packages](https://github.com/lorancecall/rmpp-packages) on the tablet.
+## Install
+
+- Install **rmpp setup** (desktop app or one-line script) from
+  [rmpp-packages](https://github.com/lorancecall/rmpp-packages#install) and tick **rmpp-hwr** (not preselected); the
+  Korean model comes with it, the other languages' models are listed under it. For text object mode tick
+  **rmpp-textobj** as well. Developer mode is needed: the rmpp-packages page explains it.
+- After a reMarkable OS update: **Restore** in rmpp setup.
+- Other ways (Vellum on the command line, the release files, `hwr install` and building it yourself) and removal:
+  [docs/install.md](docs/install.md).
 
 ## What is here
 
@@ -53,27 +66,6 @@ On the tablet:
 - Open dataset: [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db), the community's handwriting in many
   languages (how to take part, in every supported language: https://lorancecall.github.io/rmpp-hwr-db/).
   `hwr contribute` shares structured practice pages, anonymized; your language is missing? Ask for it there.
-
-## Install
-
-Requirements: reMarkable Paper Pro with developer mode and SSH (an `ssh rmpp` alias with a key), OS 3.29,
-and `rmpp-preload` on the tablet (`vellum add rmpp-preload`, see rmpp-packages).
-
-On the PC:
-
-```sh
-git clone https://github.com/lorancecall/rmpp-hwr && cd rmpp-hwr
-uv venv ../.venv && uv pip install -p ../.venv -r collect/requirements.txt
-cp .env.example .env              # tablet address etc.; never committed
-tools/hwr install                 # UI add-on + recognizer + model onto the tablet
-```
-
-`hwr install` keeps a model that is already on the tablet (pass `--model DIR` to replace it). Run it again after
-a reMarkable OS update. `hwr uninstall [--purge]` removes it.
-
-Building from source needs the Arm GNU aarch64 toolchain, Qt 6.10 headers/device libs and onnxruntime for
-linux-aarch64 in `../sdk` (see `.cargo/config.toml` and `ui/build.sh`):
-`./build.sh` (or `ui/build.sh` and `cargo build --release --target aarch64-unknown-linux-gnu`).
 
 ## Privacy
 
