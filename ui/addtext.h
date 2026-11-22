@@ -71,7 +71,7 @@ void closeStaleAddPlace() {
 // The view that draws the open page (DeviceSceneView, a child of the DocumentView; it also has viewToScene(),
 // sceneToView() and the signal closeToolbarFoldout()).
 QQuickItem *sceneViewOf(QQuickItem *dv) {
-    return findItem(dv, [](QQuickItem *i) { return classStarts(i, "DeviceSceneView") && i->isVisible(); });
+    return findItem(dv, [](QQuickItem *i) { return classStarts(i, "DeviceSceneView_QMLTYPE") && i->isVisible(); });
 }
 
 // A point in DocumentView coordinates -> page coordinates (scene units: x centred on 0, -810..810; y from the top),

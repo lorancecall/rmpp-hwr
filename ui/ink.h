@@ -411,11 +411,18 @@ void fullRefreshLater(QPointer<QQuickItem> dvp, int ms) {
 // The page is redrawn once: fullRefresh (after an edit: the box and the keyboard left ghosting) = one ghost-buster
 // refresh; otherwise one updateAfterStroke. Earlier versions redrew at 0, 300 and 1000 ms and the edit added a
 // full refresh on top: the developer saw the page flash several times (2026-11-22).
+// Ends the selection the way a pen tap outside it does (DeviceSceneView.endItemSelection): a move or resize made
+// to the selection is kept. clearSelectedItems drops a pending move (the ink jumped back, 2026-11-22).
+void endSelection(QObject *sc, QQuickItem *dv) {
+    QQuickItem *sv = dv ? findItem(dv, [](QQuickItem *i) { return classStarts(i, "DeviceSceneView_QMLTYPE") && i->isVisible(); }) : nullptr;
+    if (!sv || !QMetaObject::invokeMethod(sv, "endItemSelection")) QMetaObject::invokeMethod(sc, "clearSelectedItems");
+}
+
 void putInk(QPointer<QObject> scp, QPointer<QObject> php, QPointer<QQuickItem> dvp, int layer, bool deleteSelection,
             const Placed &pl, const QString &text, int replaceIdx, bool fullRefresh = false) {
     // addDrawingLine is ignored while a selection is active
     if (deleteSelection) QMetaObject::invokeMethod(scp, "deleteSelectedItems", Q_ARG(int, layer));
-    else QMetaObject::invokeMethod(scp, "clearSelectedItems");
+    else endSelection(scp, dvp);
     QTimer::singleShot(400, scp, [=] {
         if (!scp || !php) { setStatus(QStringLiteral("page closed"), false); return; }
         const int added = addInkStrokes(scp, php, pl.strokes, pl.em, pl.weight);
