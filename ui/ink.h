@@ -444,6 +444,7 @@ import xofm.libs.peninput
 Item {
     id: shade
     property string initial: ""
+    property string title: "Edit text"
     property var penManager: null
     property int weight: 1        // 0 thin, 1 medium, 2 thick
     property int sizePct: 100     // size of the ink, relative to now
@@ -452,6 +453,11 @@ Item {
     onWeightChanged: refresh()
     onSizePctChanged: refresh()
     Timer { id: typing; interval: 300; onTriggered: shade.refresh() }
+    // the item that was tapped to open the box (a toolbar menu entry) may still take the focus: take it back
+    Timer {
+        interval: 250; running: true
+        onTriggered: if (!input.activeFocus) { input.forceActiveFocus(); Qt.inputMethod.show(); }
+    }
     anchors.fill: parent
     z: 10000
     // outside the box: the pen draws nothing on the page, and a tap closes the box (cancel)
@@ -463,7 +469,7 @@ Rectangle {
     x: 60; y: 90
     color: "white"; border.color: "black"; border.width: 3
     MouseArea { anchors.fill: parent }   // taps inside the box stay in the box
-    Text { x: 36; y: 26; text: "Edit text"; font.pixelSize: 36; font.bold: true }
+    Text { x: 36; y: 26; text: shade.title; font.pixelSize: 36; font.bold: true }
     Rectangle {
         id: field
         x: 36; y: 86; width: parent.width - 72; height: 260
@@ -493,6 +499,12 @@ Rectangle {
         }
     }
     Text { x: 36; y: 360; text: "Preview"; font.pixelSize: 26; color: "#555555" }
+    Text {   // characters the ink font has no strokes for (they are left out)
+        x: 200; y: 360; width: parent.width - 236
+        horizontalAlignment: Text.AlignRight; elide: Text.ElideRight
+        text: hwr.inkMissing ? "Not in the ink font, left out: " + hwr.inkMissing : ""
+        font.pixelSize: 26; color: "#555555"
+    }
     Rectangle {
         x: 36; y: 400; width: parent.width - 72; height: 220
         border.color: "#999999"; border.width: 1
@@ -546,6 +558,8 @@ struct InkEdit {
     int rec = -1;
     int layer = 0;
     double em = 60, maxW = 600;   // of the ink when the box opened (page units)
+    bool create = false;          // Add text object: a new object at origin, no ink selected
+    QPointF origin;
 };
 InkEdit g_edit;
 
@@ -583,7 +597,8 @@ void closeInkEdit() {
     if (QGuiApplication::inputMethod()) QGuiApplication::inputMethod()->hide();
 }
 
-void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, const QString &text, int weight) {
+// Opens the edit box over the DocumentView for e (box, dv and page filled in here).
+void showInkEditBox(QQuickItem *dv, InkEdit e, const QString &title, const QString &text, int weight) {
     closeInkEdit();
     QQmlEngine *eng = qmlEngine(dv);
     QQmlContext *base = qmlContext(dv);
@@ -594,22 +609,31 @@ void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, c
     QObject *pin = dv->property("penInput").value<QObject *>();   // xochitl's pen input; its surface manager blocks the pen
     QObject *mgr = pin ? pin->property("surfaceManager").value<QObject *>() : nullptr;
     if (!eng->imageProvider(QStringLiteral("rmpphwr"))) eng->addImageProvider(QStringLiteral("rmpphwr"), new InkPreviewProvider);
+    g_edit = e;   // before the box: its preview reads em and maxW
+    QObject *o = createInline(eng, ctx, kEditQml, "InkEdit", dv,
+                              {{QStringLiteral("initial"), text}, {QStringLiteral("penManager"), QVariant::fromValue(mgr)},
+                               {QStringLiteral("weight"), weight}, {QStringLiteral("title"), title}});
+    if (!o) { delete ctx; g_edit = InkEdit{}; return; }
+    ctx->setParent(o);
+    g_edit.box = o;
+    g_edit.dv = dv;
+    g_edit.page = dv->property("currentPageId").toString();
+    // rmpp-refresh does a full refresh once the keyboard has slid in; the edit box gets one only when it closes
+    // (finishInkEdit). rmpp-refresh 0.3.1+ reads this flag; older versions refresh anyway.
+    qApp->setProperty("rmppKeyboardRefresh", false);
+}
+
+void openInkEdit(QQuickItem *dv, QObject *sc, QObject *ph, int layer, int rec, const QString &text, int weight) {
     // size of the ink now (it may have been scaled since it was made), for the preview
     const QJsonArray recs = readInkRecords();
     const QJsonObject r = rec >= 0 && rec < recs.size() ? recs[rec].toObject() : QJsonObject();
     const QRectF sel = selectionRect(sc, layer);
     const double k = sel.isEmpty() ? 1.0 : sel.width() / qMax(1.0, r.value(QStringLiteral("w")).toDouble(sel.width()));
-    const double em = r.value(QStringLiteral("em")).toDouble(60) * k;
-    const double maxW = qMax(sel.width() - r.value(QStringLiteral("ox")).toDouble() * k, em * 8);
-    QObject *o = createInline(eng, ctx, kEditQml, "InkEdit", dv,
-                              {{QStringLiteral("initial"), text}, {QStringLiteral("penManager"), QVariant::fromValue(mgr)},
-                               {QStringLiteral("weight"), weight}});
-    if (!o) { delete ctx; return; }
-    ctx->setParent(o);
-    g_edit = {o, sc, ph, dv, dv->property("currentPageId").toString(), rec, layer, em, maxW};
-    // rmpp-refresh does a full refresh once the keyboard has slid in; the edit box gets one only when it closes
-    // (finishInkEdit). rmpp-refresh 0.3.1+ reads this flag; older versions refresh anyway.
-    qApp->setProperty("rmppKeyboardRefresh", false);
+    InkEdit e;
+    e.sc = sc; e.ph = ph; e.rec = rec; e.layer = layer;
+    e.em = r.value(QStringLiteral("em")).toDouble(60) * k;
+    e.maxW = qMax(sel.width() - r.value(QStringLiteral("ox")).toDouble() * k, e.em * 8);
+    showInkEditBox(dv, e, QStringLiteral("Edit text"), text, weight);
 }
 
 // Called from the 1.5 s timer: the notebook was closed or the page turned while the edit box was open.
@@ -620,9 +644,30 @@ void closeStaleInkEdit() {
 }
 
 // Applies the edit; true when the ink is being redrawn (putInk).
+void tapItem(QQuickItem *item);
+
 bool applyInkEdit(const InkEdit &e) {
     if (!e.sc || !e.ph || !e.dv || e.dv->property("currentPageId").toString() != e.page) return false;
     const QString text = g_state->value(QStringLiteral("inkText")).toString().trimmed();
+    if (e.create) {   // Add text object: wraps at the page edge like an edited object
+        if (text.isEmpty()) return false;
+        const double size = qBound(50, g_state->value(QStringLiteral("inkSize")).toInt(), 200) / 100.0;
+        const double em = e.em * size;
+        Placed pl = placeText(text, e.origin, em, qMax(810.0 - 40.0 - e.origin.x(), em * 8));
+        pl.weight = qBound(0, g_state->value(QStringLiteral("inkWeight")).toInt(), 2);
+        if (pl.strokes.isEmpty()) { setStatus(QStringLiteral("no character of the text is in the ink font"), false); return false; }
+        qWarning("[rmpp-hwr] add text object: %s", qPrintable(QString(text).replace(QLatin1Char('\n'), QLatin1String(" | "))));
+        // The new ink is left selected like a converted one (move it, double tap to edit) and recorded from that
+        // selection, which needs the selection tool active (with the pen active selectWithLine selects nothing).
+        // Then, as xochitl does when the pen taps outside a selection: the selection goes, the ink is added.
+        QQuickItem *tool = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionButton"); });
+        const bool switchTool = tool && !tool->property("selected").toBool();
+        if (switchTool) tapItem(tool);
+        QTimer::singleShot(switchTool ? 600 : 0, qApp, [e, pl, text] {
+            putInk(e.sc, e.ph, e.dv, e.layer, false, pl, text, -1, true);
+        });
+        return true;
+    }
     const QJsonArray recs = readInkRecords();
     if (e.rec < 0 || e.rec >= recs.size()) return false;
     const QJsonObject r = recs[e.rec].toObject();

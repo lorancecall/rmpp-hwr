@@ -1054,6 +1054,7 @@ QObject *createInline(QQmlEngine *eng, QQmlContext *ctx, const char *qml, const 
 }
 
 #include "ink.h"
+#include "addtext.h"
 #include "practice.h"
 #include "practicenb.h"
 #include "conversions.h"
@@ -1450,10 +1451,16 @@ void hwrInit() {
     g_state->insert(QStringLiteral("inkText"), QString());
     g_state->insert(QStringLiteral("inkWeight"), 1);
     g_state->insert(QStringLiteral("inkSize"), 100);
+    g_state->insert(QStringLiteral("inkMissing"), QString());
     QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
+        if (key == QLatin1String("inkText")) { updateInkMissing(v.toString()); return; }
         if (key != QLatin1String("command")) return;
         const QString cmd = v.toString().section(QLatin1Char('#'), 0, 0);
-        if (cmd == QLatin1String("page")) {
+        if (cmd == QLatin1String("addtext")) startAddTextObject();
+        else if (cmd == QLatin1String("addtextcancel")) closeAddPlace();
+        else if (cmd.startsWith(QLatin1String("addtextat:")))
+            placeTextObject(cmd.section(QLatin1Char(':'), 1, 1).toDouble(), cmd.section(QLatin1Char(':'), 2, 2).toDouble());
+        else if (cmd == QLatin1String("page")) {
             if (g_state->value(QStringLiteral("pageReplace")).toBool()) convertPageInPlace();
             else convertCurrentPage();
         }
@@ -1504,7 +1511,7 @@ void hwrInit() {
     auto *t = new QTimer(app);
     QObject::connect(t, &QTimer::timeout, app, [] {
         if (!uiReady()) return;   // nothing UI-side before the passcode screen is gone (ghosting there)
-        loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); updateCurrentPage();
+        loadSettings(); tryInject(); tryInjectSettings(); tryInjectInkMenu(); watchSelection(); watchDoubleTap(); closeStaleInkEdit(); tryInjectAddText(); closeStaleAddPlace(); updateCurrentPage();
 #ifdef RMPP_HWR_DEV
         watchCmdFile();
 #endif
