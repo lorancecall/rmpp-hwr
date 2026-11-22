@@ -95,6 +95,7 @@ void loadSettings() {
     g_state->insert(QStringLiteral("hwrModel"), model == QLatin1String("builtin") ? QStringLiteral("deployed") : model);
     // settings from before v0.4 have no name: the deployed model of then is the Korean one (the package's name)
     g_state->insert(QStringLiteral("hwrModelName"), s.value(QStringLiteral("modelName")).toString());
+    g_state->insert(QStringLiteral("addTextEm"), s.value(QStringLiteral("addTextEm"), 0.0).toDouble());
 }
 
 void saveSetting(const QString &key, const QVariant &v) {
@@ -1496,6 +1497,7 @@ void hwrInit() {
     g_state->insert(QStringLiteral("inkWeight"), 1);
     g_state->insert(QStringLiteral("inkSize"), 100);
     g_state->insert(QStringLiteral("inkMissing"), QString());
+    g_state->insert(QStringLiteral("addTextEm"), 0.0);
     QObject::connect(g_state, &QQmlPropertyMap::valueChanged, app, [](const QString &key, const QVariant &v) {
         if (key == QLatin1String("inkText")) { updateInkMissing(v.toString()); return; }
         if (key != QLatin1String("command")) return;

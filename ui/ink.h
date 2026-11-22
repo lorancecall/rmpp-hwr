@@ -340,6 +340,17 @@ int findInkRecord(const QJsonArray &recs, const QString &page, int n, const QRec
     return -1;
 }
 
+void tapItem(QQuickItem *item);
+
+// The selection tool, made active if it is not (selectWithLine selects nothing while the pen is active).
+// Returns true if it had to be switched.
+bool useSelectionTool() {
+    QQuickItem *tool = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionButton"); });
+    if (!tool || tool->property("selected").toBool()) return false;
+    tapItem(tool);
+    return true;
+}
+
 // After new ink is added and selected: measure the selection and store (or replace record `replaceIdx`). The
 // selection settles after a while (longer for big ink), so measure again until it holds all n new strokes.
 void recordInk(QPointer<QObject> scp, const QString &page, const QString &text, const Placed &pl, int n, int replaceIdx,
@@ -349,6 +360,12 @@ void recordInk(QPointer<QObject> scp, const QString &page, const QString &text, 
         const int count = scp->property("selectionItemCount").toInt();
         const QRectF r = count == n ? selectionRect(scp, scp->property("currentLayer").toInt()) : QRectF();
         if (r.isEmpty()) {
+            // nothing selected yet (the tool switch was slow, or the selection was dropped): select again
+            if (count == 0 && (attempt == 1 || attempt == 3)) {
+                const bool switched = useSelectionTool();
+                qWarning("[rmpp-hwr] ink: new ink not selected yet, selecting again%s", switched ? " (selection tool)" : "");
+                QTimer::singleShot(switched ? 500 : 0, scp, [scp, pl] { if (scp) selectInk(scp, pl.strokes); });
+            }
             if (attempt < 6) recordInk(scp, page, text, pl, n, replaceIdx, attempt + 1);
             else qWarning("[rmpp-hwr] ink: new ink not selected (%d of %d), not recorded", count, n);
             return;
@@ -618,8 +635,6 @@ void closeStaleInkEdit() {
 }
 
 // Applies the edit; true when the ink is being redrawn (putInk).
-void tapItem(QQuickItem *item);
-
 bool applyInkEdit(const InkEdit &e) {
     if (!e.sc || !e.ph || !e.dv || e.dv->property("currentPageId").toString() != e.page) return false;
     const QString text = g_state->value(QStringLiteral("inkText")).toString().trimmed();
@@ -634,9 +649,8 @@ bool applyInkEdit(const InkEdit &e) {
         // The new ink is left selected like a converted one (move it, double tap to edit) and recorded from that
         // selection, which needs the selection tool active (with the pen active selectWithLine selects nothing).
         // Then, as xochitl does when the pen taps outside a selection: the selection goes, the ink is added.
-        QQuickItem *tool = findAnywhere([](QQuickItem *i) { return i->objectName() == QLatin1String("selectionButton"); });
-        const bool switchTool = tool && !tool->property("selected").toBool();
-        if (switchTool) tapItem(tool);
+        saveSetting(QStringLiteral("addTextEm"), em);   // the next new object starts at this size
+        const bool switchTool = useSelectionTool();
         QTimer::singleShot(switchTool ? 600 : 0, qApp, [e, pl, text] {
             putInk(e.sc, e.ph, e.dv, e.layer, false, pl, text, -1, true);
         });

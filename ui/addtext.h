@@ -88,14 +88,11 @@ bool viewToPage(QQuickItem *dv, const QPointF &p, QPointF *out) {
     return true;
 }
 
-// The em size for a new object: the newest text object's on this page, else the newest one, else 60.
-double defaultTextObjectEm(const QString &pageId) {
-    const QJsonArray recs = readInkRecords();
-    double em = 0;
-    for (int i = recs.size() - 1; i >= 0 && em <= 0; --i)
-        if (recs[i].toObject().value(QStringLiteral("page")).toString() == pageId) em = recs[i].toObject().value(QStringLiteral("em")).toDouble();
-    if (em <= 0 && !recs.isEmpty()) em = recs.last().toObject().value(QStringLiteral("em")).toDouble();
-    return em > 0 ? qBound(30.0, em, 160.0) : 60.0;
+// The em size for a new object: the size the last new object was made at (its size in the edit box included), else
+// about the size of xochitl's body text. Not converted handwriting's: that follows the handwriting and is big.
+double defaultTextObjectEm() {
+    const double em = g_state->value(QStringLiteral("addTextEm")).toDouble();
+    return em > 0 ? qBound(20.0, em, 200.0) : 40.0;
 }
 
 // Closes the typing tool's menu (foldout), as picking one of xochitl's own entries does.
@@ -141,7 +138,7 @@ void placeTextObject(double x, double y) {
     InkEdit e;
     e.sc = sc; e.ph = ph; e.layer = sc->property("currentLayer").toInt();
     e.create = true;
-    e.em = defaultTextObjectEm(dv->property("currentPageId").toString());
+    e.em = defaultTextObjectEm();
     e.origin = at - QPointF(0, e.em * 0.5);   // the tap marks the middle of the first line
     e.maxW = qMax(810.0 - 40.0 - e.origin.x(), e.em * 8);
     g_state->insert(QStringLiteral("inkMissing"), QString());
