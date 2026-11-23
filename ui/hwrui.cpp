@@ -1385,6 +1385,7 @@ QString inkIconUrl() {
     static QString url;
     if (!url.isEmpty()) return url;
     QFile in(QStringLiteral(":/ark/icons/hwc"));
+    QDir().mkpath(QLatin1String(kDataDir));   // absent after a clean install with packaged models
     const QString out = QLatin1String(kDataDir) + QStringLiteral("/ink_convert.svg");
     QString svg;
     if (in.open(QIODevice::ReadOnly)) {
