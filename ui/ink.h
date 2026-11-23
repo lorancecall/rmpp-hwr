@@ -119,12 +119,29 @@ QList<InkLine> recognizeImage(const QImage &src) {
         if (it != lines.end()) { it->y0 = qMin(it->y0, double(b.top())); it->y1 = qMax(it->y1, double(b.bottom())); it->ids << i; }
         else lines.append(L{{i}, double(b.top()), double(b.bottom())});
     }
+    // Lines grown one component at a time can end up overlapping (a tall "T" or "?" next to small letters starts a
+    // line of its own): merge lines that share 30% of the shorter one's height.
+    for (bool merged = true; merged;) {
+        merged = false;
+        for (int a = 0; a < lines.size() && !merged; ++a)
+            for (int b = a + 1; b < lines.size() && !merged; ++b) {
+                const double ov = qMin(lines[a].y1, lines[b].y1) - qMax(lines[a].y0, lines[b].y0);
+                if (ov < 0.3 * qMin(lines[a].y1 - lines[a].y0, lines[b].y1 - lines[b].y0)) continue;
+                lines[a].ids << lines[b].ids;
+                lines[a].y0 = qMin(lines[a].y0, lines[b].y0);
+                lines[a].y1 = qMax(lines[a].y1, lines[b].y1);
+                lines.removeAt(b);
+                merged = true;
+            }
+    }
+    // Dots, commas and accents go with the nearest line within two median heights (one was too tight: a dot above
+    // the writing came out as a line "." of its own); farther away they stay a line of their own.
     for (int i : order) {
         if (!small(i)) continue;
         const double cy = (comps[i].top() + comps[i].bottom()) / 2.0;
         auto dist = [&](const L &l) { return cy < l.y0 ? l.y0 - cy : (cy > l.y1 ? cy - l.y1 : 0.0); };
         auto best = std::min_element(lines.begin(), lines.end(), [&](const L &a, const L &b) { return dist(a) < dist(b); });
-        if (best != lines.end() && dist(*best) < median) best->ids << i;
+        if (best != lines.end() && dist(*best) < 2 * median) best->ids << i;
         else lines.append(L{{i}, double(comps[i].top()), double(comps[i].bottom())});
     }
     std::sort(lines.begin(), lines.end(), [](const L &a, const L &b) { return a.y0 < b.y0; });
