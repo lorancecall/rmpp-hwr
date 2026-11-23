@@ -134,6 +134,32 @@ QList<InkLine> recognizeImage(const QImage &src) {
                 merged = true;
             }
     }
+    // Hangul final consonants (batchim) written under the vowel line came out as a line of their own ("안녕?" was
+    // recognized as "아녀? | 나요", #16): a short line right under a taller one, every part of it under that line's
+    // width, joins it. Two written lines stay apart: the second is not much shorter, or the gap is a line gap.
+    auto xSpan = [&](const L &l) {
+        int x0 = INT_MAX, x1 = INT_MIN;
+        for (int i : l.ids) { x0 = qMin(x0, comps[i].left()); x1 = qMax(x1, comps[i].right()); }
+        return qMakePair(x0, x1);
+    };
+    for (bool merged = true; merged;) {
+        merged = false;
+        std::sort(lines.begin(), lines.end(), [](const L &a, const L &b) { return a.y0 < b.y0; });
+        for (int a = 0; a + 1 < lines.size() && !merged; ++a) {
+            L &top = lines[a];
+            const L &bot = lines[a + 1];
+            const double ht = top.y1 - top.y0, hb = bot.y1 - bot.y0, gap = bot.y0 - top.y1;
+            if (gap >= 0.35 * ht || hb >= 0.6 * ht) continue;
+            const auto span = xSpan(top);
+            bool under = true;
+            for (int i : bot.ids) if (comps[i].left() < span.first || comps[i].right() > span.second) under = false;
+            if (!under) continue;
+            top.ids << bot.ids;
+            top.y1 = qMax(top.y1, bot.y1);
+            lines.removeAt(a + 1);
+            merged = true;
+        }
+    }
     // Dots, commas and accents go with the nearest line within two median heights (one was too tight: a dot above
     // the writing came out as a line "." of its own); farther away they stay a line of their own.
     for (int i : order) {
