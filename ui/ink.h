@@ -213,13 +213,13 @@ void showInkBusy(QQuickItem *dv) {
 // OS 3.29 keeps a page's typed text in one text column (the root document) that starts at the top of the page; it
 // cannot be placed at a free x/y. The recognized text goes to the line at the height of the selection, as
 // reMarkable's own lasso convert does: below the existing text with blank lines up to that height, or, when the
-// text already reaches that height, at the end of the line there. Measured on 3.29: line pitch 53.55 for the default
-// paragraph style. Strokes below the text column are anchored to it, so inserted lines push them down (as typing
-// does): kept handwriting ends up just below its text, and so does all handwriting further down the page. Moving
-// them back failed (moveSelectedItems after addSelectionRect does nothing; clone + delete + cloneAddAndSelectItems
-// only deletes), see exp28/exp29. Inserting text ends the lasso selection, so with replace the
-// handwriting is deleted first (one undo step each).
-constexpr double kTextLinePitch = 53.55;
+// text already reaches that height, at the end of the line there. Strokes below the text column are anchored to it,
+// so inserted lines push them down (as typing does); they are moved back up afterwards (inkShift, moveInkBack:
+// moveSelectedItems works when followed by applyPendingEdit and endItemSelection, #18). Inserting text ends the
+// lasso selection, so with replace the handwriting is deleted first (one undo step each).
+// One line of xochitl's body text is 53.55 high, but each further paragraph (a newline) adds 69.55: measured on
+// OS 3.29.1 by appending newlines one at a time (#18: with 53.55 the text landed 7 lines too low for line 22).
+constexpr double kTextLinePitch = 69.55;
 
 // Selects the strokes inside a scene rect (SceneController::addSelectionRect, mode 0); false if not available.
 // Only works while the selection tool is active (tested: with the pen active it selects nothing).
@@ -231,6 +231,39 @@ bool selectRect(QObject *sc, const QRect &r) {
     void *a[] = {nullptr, &rect, &mode};
     sc->qt_metacall(QMetaObject::InvokeMetaMethod, m, a);
     return true;
+}
+
+// The current layer's stroke rects (scene units) in r; selected strokes are left out.
+QList<QRect> strokeRects(QObject *sc, const QRect &r = QRect(-5000, -5000, 10000, 40000)) {
+    QList<QRect> out;
+    QMetaObject::invokeMethod(sc, "getLineBoundingRectsToBeSelected", Q_RETURN_ARG(QList<QRect>, out), Q_ARG(QRect, r));
+    return out;
+}
+
+// Typed text grows the page's text block, and ink below the text moves down with it (it is anchored to the text;
+// #18: a lasso conversion with newlines to reach the handwriting's height pushed the rest of the page down by
+// them). How far the ink moved: the same stroke (x, width, height) before and after, lowest first.
+int inkShift(const QList<QRect> &before, const QList<QRect> &after) {
+    QList<QRect> b = before;
+    std::sort(b.begin(), b.end(), [](const QRect &p, const QRect &q) { return p.bottom() > q.bottom(); });
+    for (const QRect &r : b)
+        for (const QRect &a : after)
+            if (a.x() == r.x() && a.width() == r.width() && a.height() == r.height() && a.y() != r.y()) return a.y() - r.y();
+    return 0;
+}
+
+// Moves the ink that the text pushed down back up by dy: selects what lies below `from` (the text's old bottom,
+// moved), moves it, and ends the selection so the move is kept (clearSelectedItems would drop it).
+void moveInkBack(QObject *sc, int layer, int from, int dy) {
+    if (!selectRect(sc, QRect(-5000, from + dy, 10000, 40000))) return;
+    QTimer::singleShot(250, sc, [sc, layer, dy] {
+        if (sc->property("selectionItemCount").toInt() <= 0) return;
+        QMetaObject::invokeMethod(sc, "moveSelectedItems", Q_ARG(int, layer), Q_ARG(QPointF, QPointF(0, -dy)));
+        QMetaObject::invokeMethod(sc, "applyPendingEdit", Q_ARG(int, layer));
+        QQuickItem *sv = findAnywhere([](QQuickItem *i) { return classStarts(i, "DeviceSceneView_QMLTYPE") && i->isVisible(); });
+        if (!sv || !QMetaObject::invokeMethod(sv, "endItemSelection")) QMetaObject::invokeMethod(sc, "clearSelectedItems");
+        qWarning("[rmpp-hwr] ink under the text moved back up by %d", dy);
+    });
 }
 
 // The conversion being typed (for Save conversions): document, page index and id, the recognized ink.
@@ -262,6 +295,8 @@ void putText(QPointer<QObject> scp, int layer, bool replace, const QList<QPair<d
             const int newlines = used == 0 ? target : qMax(1, target - used + 1);
             QMetaObject::invokeMethod(scp, "setCursorIndex", Q_ARG(int, len));
             insert = QString(newlines, QLatin1Char('\n')) + lines.first().second;
+            qWarning("[rmpp-hwr] typed text at y %.0f: text block %.0f-%.0f, %d line(s) in use, %d newline(s)", y,
+                     root.top(), root.bottom(), used, newlines);
         }
         // the next lines at their own heights (at least one line apart)
         for (int i = 1; i < lines.size(); ++i)
@@ -269,10 +304,13 @@ void putText(QPointer<QObject> scp, int layer, bool replace, const QList<QPair<d
         QStringList texts;
         for (const auto &l : lines) texts << l.second;
         const QString text = texts.join(QLatin1String(" | "));
+        const QList<QRect> inkBefore = strokeRects(scp);
         QMetaObject::invokeMethod(scp, "replaceText", Q_ARG(QString, insert));
         QTimer::singleShot(300, scp, [=] {
             if (!scp) return;
             const bool in = scp->property("rootDocumentLength").toInt() > len;
+            const int dy = in ? inkShift(inkBefore, strokeRects(scp)) : 0;
+            if (dy > 0) moveInkBack(scp, layer, int(root.bottom()), dy);
             qWarning("[rmpp-hwr] text: %s (%s)", qPrintable(text),
                      in ? "inserted" : "NOT inserted");
             if (in && g_convCtx.page >= 0)
