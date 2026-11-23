@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 #include <algorithm>
 #include <cmath>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
