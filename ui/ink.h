@@ -240,8 +240,10 @@ bool g_pageConvert = false;   // set by convertPageInPlace for the conversion it
 
 // lines: each recognized line with its vertical centre (scene units), top to bottom.
 void putText(QPointer<QObject> scp, int layer, bool replace, const QList<QPair<double, QString>> &lines) {
+    // deleteSelectedItems removes the strokes from the page, but the selection keeps them: ending it later (a tap
+    // with the selection tool) put them back (#17). Clearing the selection drops them for good.
     if (replace) QMetaObject::invokeMethod(scp, "deleteSelectedItems", Q_ARG(int, layer));
-    else QMetaObject::invokeMethod(scp, "clearSelectedItems");
+    QMetaObject::invokeMethod(scp, "clearSelectedItems");
     if (!scp->property("hasRootDocument").toBool()) QMetaObject::invokeMethod(scp, "createRootDocument");
     // the root document's properties update asynchronously
     QTimer::singleShot(300, scp, [=] {
