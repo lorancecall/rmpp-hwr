@@ -8,13 +8,14 @@ same for every rmpp add-on live in rmpp-packages and are linked here, not repeat
 
 | Package | Installs with it |
 |---|---|
-| `rmpp-hwr` (lasso convert, Convert page, Settings > Handwriting, the recognizer) | `rmpp-hwr-ko`, `rmpp-textobj`, `rmpp-lang`, `rmpp-preload` |
+| `rmpp-hwr` (lasso convert, Convert page, Settings > Handwriting, the recognizer) | `rmpp-textobj`, `rmpp-lang`, `rmpp-preload` |
 | `rmpp-hwr-ko` (Korean model, trained on [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db)) | `rmpp-hwr` |
 | `rmpp-hwr-zh`, `rmpp-hwr-ja`, `rmpp-hwr-en`, `rmpp-hwr-latin` (base models of other languages) | `rmpp-hwr` |
 | `rmpp-textobj` (text objects, used for text object mode) | `rmpp-lang`, `rmpp-preload` |
 
-Dependencies are installed automatically, in rmpp setup and with `vellum add`. In rmpp setup the other languages'
-models are listed under Handwriting recognition. All packages and what needs what:
+Dependencies are installed automatically, in rmpp setup and with `vellum add`. The models are separate packages:
+rmpp setup ticks the Korean model `rmpp-hwr-ko` by default and lists the other languages' models under
+Handwriting recognition (beta); with `vellum add`, name the models you want. All packages and what needs what:
 [packages.md](https://github.com/lorancecall/rmpp-packages/blob/main/docs/packages.md).
 
 ## Without rmpp setup
@@ -23,8 +24,8 @@ Follow [manual-install.md](https://github.com/lorancecall/rmpp-packages/blob/mai
 the rmpp package repository), then on the Paper Pro:
 
 ```sh
-vellum add rmpp-hwr            # with rmpp-hwr-ko, rmpp-textobj, rmpp-lang, rmpp-preload
-vellum add rmpp-hwr-en         # other languages' models as you like: rmpp-hwr-zh, -ja, -latin
+vellum add rmpp-hwr rmpp-hwr-ko   # with rmpp-textobj, rmpp-lang, rmpp-preload; Korean model
+vellum add rmpp-hwr-en            # other languages' models as you like: rmpp-hwr-zh, -ja, -latin
 ```
 
 Older ways, for developers and old installs:
