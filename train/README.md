@@ -25,9 +25,10 @@ machines, accounts or paths lives in the code.
 | `HWR_SLURM_GPU_PARTITION`, `HWR_SLURM_GPU_QOS`, `HWR_SLURM_GPU_GRES` | where training/export run |
 | `HWR_SLURM_CPU_PARTITION`, `HWR_SLURM_CPU_QOS` | where data generation and evaluation run |
 | `HWR_SLURM_ACCOUNT` | optional `-A` |
+| `HWR_RUN_CLEAN` | what `hwr run` deletes after a verified download: `run` (default), `all` or `none` |
 
 Resources per job kind (Slurm): `gpu` 10 CPUs/48 GB/6 h, `gpu-short` 4/16 GB/40 min, `cpu` 8/16 GB/1 h,
-`cpu-big` 32/64 GB/3 h (`RES` in `tools/hwr.py`).
+`cpu-big` 32/64 GB/3 h, `tiny` 1/1 GB/5 min (`RES` in `tools/hwr.py`).
 
 ## Layout
 
@@ -53,9 +54,66 @@ hwr job gen_base.sh --res cpu-big          # once: synthetic train/val lines
 hwr train [NAME]                           # upload personal data -> gen_personal -> train -> export + judge
 hwr status                                 # queue / background state, newest log, exports, best
 hwr fetch NAME                             # export/NAME/rec.onnx -> hwr-train/out/NAME, eval through the Paper Pro pipeline
+hwr run NAME                               # all of the above hands-off, then clean the backend (below)
 hwr job probe.sh --res gpu-short           # training-mode sanity check of the base weights
 hwr job eval.sh export/NAME/rec.onnx --res cpu
 ```
+
+## Hands-off runs (`hwr run`)
+
+`hwr run NAME` does a whole training round without anyone watching:
+
+1. checks that the work dir is set up (PaddleOCR, synthetic data, base weights), uploads your lines (`hwr upload`)
+   and `train/` (`hwr sync`);
+2. submits `gen_personal.sh` -> `train.sh` -> `export.sh` (as `hwr train`);
+3. waits, checking the jobs every `--interval` seconds (default 120; Slurm: `sacct`/`squeue`). If the cluster cannot
+   be reached it keeps trying with a growing pause (up to 30 minutes), so a network hiccup only delays it. When a step
+   fails, the steps after it are cancelled;
+4. downloads `export/NAME/` (`rec.onnx`, `dict.txt`, `summary.txt`, `personal_cer.txt`) to `hwr-train/out/NAME/` and
+   the job logs to `hwr-train/out/NAME/logs/`, and compares every file's size and sha256 with the cluster's copy.
+   A failed run downloads only its logs;
+5. only after that check passes, cleans up (`--clean`, default `HWR_RUN_CLEAN` or `run`):
+   - `run`: what this run left on the backend: `export/NAME`, its logs, `cfg_NAME.yml`, its training lists and
+     augmented lines, `code/`, and your uploaded handwriting (`data/personal/` and the personal validation lines
+     made from it). Its checkpoints go too, except `latest.pdparams`/`latest.states` when `export.sh` promoted the
+     run to `best.txt` (the next run starts from them). The shared setup (Python env, PaddleOCR, base weights,
+     synthetic data) stays, so the next run starts at once;
+   - `all`: the whole work dir (`hwr clean --yes`), including a Python env inside it. Nothing is left on the
+     backend, and the next run needs the full setup again (env, `hwr setup`, base weights, `gen_base.sh`);
+   - `none`: nothing;
+6. scores the model (`hwr eval NAME`) when the host recognizer is built here; otherwise run that later.
+
+Every step is recorded in `hwr-train/out/runs/NAME.json`. Run the same command again after an interruption (closed
+terminal, reboot, lost network) and it continues from where it stopped: it never submits a run twice and never
+cleans before a verified download. A finished run only prints where its results are.
+
+Run it so it survives logging out, e.g. on a server that reaches the cluster with its own ssh key (an entry for
+`HWR_SLURM_HOST` in `~/.ssh/config`, key without a passphrase or loaded in an agent, since nobody types one):
+
+```sh
+tmux new -s hwr 'tools/hwr run my-run; read'          # detach: Ctrl-b d; back: tmux attach -t hwr
+nohup tools/hwr run my-run > run-my-run.log 2>&1 &    # or without tmux; tail -f run-my-run.log
+```
+
+Check the pipeline itself (submit, chained jobs, wait, download, checksums, cleanup) without data, GPU or Python
+env: `hwr run check-1 --selftest` runs two one-CPU jobs of a few seconds (`jobs/selftest.sh`) and keeps the
+download in `hwr-train/out/runs/check-1-selftest/`. Try it in a separate test work dir first, e.g.
+`HWR_SLURM_WORK=<new empty dir> hwr run check-1 --selftest --clean all`.
+
+## Cleaning the backend (`hwr clean`)
+
+```sh
+hwr clean --run NAME      # one run's files and the uploaded handwriting (as `hwr run --clean run`)
+hwr clean                 # the whole work dir: lists it with its size, then asks you to type its name
+hwr clean --yes           # the same without asking (scripts)
+```
+
+Deleting is refused when the work dir path is empty, relative, contains `..`, is `/` or directly below it, is the
+home dir or one of its parents, has no `.hwr-work` marker (`hwr sync` writes it, so only folders hwr has used
+qualify), or while hwr jobs are still queued or running. Nothing outside `HWR_SLURM_WORK` (or `HWR_LOCAL_WORK`) is
+ever deleted. A Python env counts as part of the work dir only if it lives inside it.
+
+## Job settings
 
 `train.sh` reads `EPOCHS`, `LR`, `WIDTH`, `FREEZE_BN`; `gen_personal.sh` reads `PERS_X` (augmented copies per
 personal line) and `REPLAY` (synthetic lines mixed in). Set them in `HWR_*_SETUP` or export them in a custom job.

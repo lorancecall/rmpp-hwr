@@ -98,6 +98,15 @@ hwr status             # jobs and the last log lines
 lines so nothing is forgotten), fine-tune from the current best model (or the base model), export
 `export/NAME/rec.onnx` and score it. A model only becomes the new best if it beats the old one.
 
+Or hands-off, in one command that also waits, downloads (checked against checksums) and cleans up the backend:
+
+```
+hwr run my-run          # = hwr train + wait + hwr fetch + delete the run's files and your uploaded lines there
+```
+
+Start it inside `tmux` or with `nohup` on a machine that stays on; if it stops, `hwr run my-run` again continues
+where it was (train/README.md, "Hands-off runs").
+
 ## 5. Check the new model
 
 ```
