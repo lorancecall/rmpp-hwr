@@ -17,6 +17,10 @@
   hwr train [NAME]         upload, then personal synth -> fine-tune -> export + judge (see train/README.md)
   hwr status               training jobs and the last lines of the newest log
   hwr fetch NAME           download export/NAME/rec.onnx -> hwr-train/out/NAME, then eval it
+  hwr run NAME [--clean run|all|none]
+                           hands-off `train` + wait + `fetch` (checksums verified) + clean the backend; run it again
+                           with the same NAME to resume after an interruption (see train/README.md)
+  hwr clean [--run NAME]   delete the whole work dir on the backend (asks first), or only one run's files
   hwr eval [NAME]          error rate (CER) of a model on your eval lines; no NAME = the model on the tablet
   hwr deploy NAME [--as V] install hwr-train/out/NAME on the tablet as the next rmpp-hwr-korean-v0.N
                            (replaces older models of the language; `hwr rollback` goes one step back; versions in hwr-train/out/releases.json)
@@ -52,8 +56,6 @@ OUT = DEV / "hwr-train" / "out"
 COLLECT = HWR / "collect" / "collect.py"
 EXE = HWR / "target" / "release" / ("rmpp-hwr.exe" if os.name == "nt" else "rmpp-hwr")
 BASE_MODEL = HWR / "model"                                # base rec.onnx + dict.txt
-ORT = DEV / "sdk" / "onnxruntime-win-x64-1.31.1" / "lib" / "onnxruntime.dll"
-
 TRAIN = HWR / "train"                                     # jobs/, scripts/, patches/ copied to the work dir
 
 
@@ -82,6 +84,46 @@ def need(key):
     if not v:
         sys.exit(f"{key} is not set: add it to {HWR / '.env'} (see .env.example)")
     return v
+
+
+SDK = DEV / "sdk"                                         # cross-build kit next to this repo (build.sh's ../sdk)
+
+
+def host_ort():
+    """onnxruntime for the host recognizer (`hwr eval`, `hwr qc`, `hwr fetch`): HWR_ORT, else the copy in the sdk
+    for this computer (win-x64, linux-x64, linux-aarch64 or osx 1.31.1), else the library inside an installed
+    onnxruntime Python package (its wheels carry it: `pip install onnxruntime==1.31.1`)."""
+    if cfg("HWR_ORT"):
+        return Path(cfg("HWR_ORT")).expanduser()
+    import platform
+    arm = platform.machine().lower() in ("aarch64", "arm64")
+    if os.name == "nt":
+        sdk, pat = SDK / "onnxruntime-win-x64-1.31.1" / "lib" / "onnxruntime.dll", "onnxruntime.dll"
+    elif sys.platform == "darwin":
+        sdk = SDK / f"onnxruntime-osx-{'arm64' if arm else 'x86_64'}-1.31.1" / "lib" / "libonnxruntime.dylib"
+        pat = "libonnxruntime*.dylib"
+    else:
+        sdk, pat = SDK / f"onnxruntime-linux-{'aarch64' if arm else 'x64'}-1.31.1" / "lib" / "libonnxruntime.so", "libonnxruntime.so*"
+    if sdk.exists():
+        return sdk
+    import importlib.util
+    spec = importlib.util.find_spec("onnxruntime")
+    if spec and spec.origin:
+        found = sorted((Path(spec.origin).parent / "capi").glob(pat))
+        if found:
+            return found[0]
+    return sdk
+
+
+def recognizer_env():
+    """Environment for the host recognizer (EXE); exits with a hint when it or onnxruntime is missing."""
+    ort = host_ort()
+    if not EXE.exists():
+        sys.exit(f"no host recognizer at {EXE}: build it with `cargo build --release` in {HWR}")
+    if not ort.exists():
+        sys.exit(f"no onnxruntime at {ort}: set HWR_ORT in {HWR / '.env'} to this computer's onnxruntime library "
+                 "(1.31.1: onnxruntime.dll, libonnxruntime.so or libonnxruntime.dylib)")
+    return {**os.environ, "ORT_DYLIB_PATH": str(ort), "PYTHONIOENCODING": "utf-8"}
 
 
 TABLET = cfg("RMPP_HOST", "rmpp")
@@ -243,7 +285,8 @@ def cmd_tidy(a):
 # ---- training backends: local GPU or Slurm cluster (settings in .env) ----
 # Slurm resources per kind of job; the local backend runs everything on HWR_LOCAL_GPU.
 RES = {"gpu": ("gpu", 10, "48G", "06:00:00"), "gpu-short": ("gpu", 4, "16G", "00:40:00"),
-       "cpu": ("cpu", 8, "16G", "01:00:00"), "cpu-big": ("cpu", 32, "64G", "03:00:00")}
+       "cpu": ("cpu", 8, "16G", "01:00:00"), "cpu-big": ("cpu", 32, "64G", "03:00:00"),
+       "tiny": ("cpu", 1, "1G", "00:05:00")}
 
 
 class Backend:
@@ -251,6 +294,9 @@ class Backend:
         self.kind = cfg("HWR_BACKEND", "local")
         if self.kind == "slurm":
             self.host, self.work, self.setup = need("HWR_SLURM_HOST"), need("HWR_SLURM_WORK"), cfg("HWR_SLURM_SETUP")
+            if not self.work.startswith("/"):
+                sys.exit(f"HWR_SLURM_WORK must be an absolute path on the cluster, not {self.work!r} (Git Bash rewrites "
+                         "/paths in environment variables: put it in .env, or set MSYS_NO_PATHCONV=1)")
         elif self.kind == "local":
             self.host, self.work, self.setup = None, need("HWR_LOCAL_WORK"), cfg("HWR_LOCAL_SETUP")
         else:
@@ -284,7 +330,16 @@ class Backend:
             for f in code.rglob("*.sh"):   # LF line endings for bash on the other side
                 f.write_bytes(f.read_bytes().replace(b"\r\n", b"\n"))
             self.put(Path(t), ["code"], ".", clean="code")
+        # the marker that lets `hwr clean` delete this folder (it refuses folders without it)
+        self.sh(f"test -f {MARK} || echo 'work dir of rmpp-hwr tools/hwr.py; `hwr clean` may delete this folder' > {MARK}")
         print(f"synced train/ to {self.kind}:{self.work}/code")
+
+    def raw(self, script, capture=False):
+        """Run a bash script on the backend without changing into the work dir."""
+        if self.kind == "slurm":
+            return ssh(self.host, script, capture=capture)
+        r = subprocess.run(["bash", "-c", script], check=True, capture_output=capture, text=True, encoding="utf-8")
+        return r.stdout if capture else None
 
     def put(self, src, names, dst_rel, clean=None):
         """Copy names from local dir src into <work>/dst_rel (clean = subdir to delete first)."""
@@ -312,11 +367,13 @@ class Backend:
         else:
             shutil.copy2(Path(self.work) / rel, local_path)
 
-    def submit(self, name, steps, env=None):
+    def submit(self, name, steps, env=None, on_job=None):
         """steps = [(job, [args], res)], run in order; each starts only if the previous one succeeded.
-        env: extra variables for every step, e.g. {"EPOCHS": "4"} (read by the job scripts)."""
+        env: extra variables for every step, e.g. {"EPOCHS": "4"} (read by the job scripts).
+        on_job(job name, id): called after each sbatch (Slurm). Returns [(job name, id)] ([] for local)."""
         pre = " ".join(f"{k}={v}" for k, v in (env or {}).items())
         pre = f"env {pre} " if pre else ""
+        jobs = []
         if self.kind == "slurm":
             prev = None
             for job, args, res in steps:
@@ -336,6 +393,9 @@ class Backend:
                 prev = self.sh(f"mkdir -p logs && sbatch --parsable -J {jn} -o logs/{jn}-%j.out {' '.join(opts)} "
                                f"--wrap '{wrap}'", capture=True).strip().split(";")[0]
                 print(f"submitted {jn}: job {prev}")
+                jobs.append((jn, prev))
+                if on_job:
+                    on_job(jn, prev)
         else:
             cmds = [f"{pre}bash code/jobs/run.sh {job} {' '.join(args)} > logs/hwr-{name}-{Path(job).stem}.log 2>&1"
                     for job, args, _ in steps]
@@ -345,6 +405,7 @@ class Backend:
             subprocess.Popen(["bash", "-c", script], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, **flags)
             print(f"started hwr-{name} locally in the background ({len(steps)} step(s)); logs in {self.work}/logs")
+        return jobs
 
     def status(self, lines):
         q = ("squeue -u $USER -h -o '%i %j %T %M/%l' | grep ' hwr-' || echo 'no hwr jobs queued'; "
@@ -439,6 +500,368 @@ def cmd_fetch(a):
     cmd_eval(argparse.Namespace(name=a.name))
 
 
+# ---- hands-off training: upload -> submit -> wait -> fetch + verify -> clean (`hwr run`, `hwr clean`) ----
+MARK = ".hwr-work"                        # written by `hwr sync`; `hwr clean` refuses a work dir without it
+RUNS = OUT / "runs"                       # one state file per `hwr run` (resumes after a restart)
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+EXPORT_FILES = ["rec.onnx", "dict.txt", "summary.txt", "personal_cer.txt", "DONE"]
+LIVE = {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "REQUEUED", "REQUEUE_HOLD", "REQUEUE_FED", "RESIZING",
+        "SUSPENDED", "STAGE_OUT", "SIGNALING", "UNKNOWN"}
+
+
+def log(msg):
+    print(f"[{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def q(s):
+    import shlex
+    return shlex.quote(str(s))
+
+
+def run_steps(name, selftest):
+    if selftest:   # pipeline check: two chained CPU steps of a few seconds, no data, no Python env
+        return [("selftest.sh", [name, "1"], "tiny"), ("selftest.sh", [name, "2"], "tiny")]
+    return [("gen_personal.sh", [name], "cpu"), ("train.sh", [name], "gpu"), ("export.sh", [name], "gpu-short")]
+
+
+def work_guard(b):
+    """Checks before anything in the work dir is deleted. Returns its real path, or None when it does not exist.
+    Exits on: an empty or relative path, '..', '/', the home dir or one of its parents, a path with fewer than two
+    levels, or a folder without the marker that `hwr sync` writes."""
+    w = (b.work or "").strip()
+    if not w:
+        sys.exit("refusing to delete: the work dir is not set")
+    absolute = w.startswith("/") or (b.kind == "local" and re.match(r"^[A-Za-z]:[/\\]", w))
+    if not absolute or ".." in re.split(r"[/\\]", w):
+        sys.exit(f"refusing to delete: the work dir {w!r} is not a plain absolute path")
+    out = b.raw(f"w={q(w)}; [ -d \"$w\" ] || {{ echo MISSING; exit 0; }}; "
+                "echo \"REAL $(cd \"$w\" && pwd -P)\"; echo \"HOME $(cd ~ && pwd -P)\"; "
+                f"[ -f \"$w/{MARK}\" ] && echo MARK; true", capture=True)
+    if "MISSING" in out.split():
+        return None
+    info = {l.split(" ", 1)[0]: l.split(" ", 1)[1] if " " in l else "" for l in out.splitlines() if l.strip()}
+    real, home = info.get("REAL", "").rstrip("/"), info.get("HOME", "").rstrip("/")
+    if not real or not home or real == home or home.startswith(real + "/") or len([p for p in real.split("/") if p]) < 2:
+        sys.exit(f"refusing to delete {w} ({real}): it is the root, one level below it, or the home dir or one of its parents")
+    if "MARK" not in info:
+        sys.exit(f"refusing to delete {w}: no {MARK} marker there (only folders `hwr sync` has used are deleted)")
+    return real
+
+
+def busy_jobs(b, pattern):
+    """Ids of the user's queued/running Slurm jobs whose name matches the shell pattern (e.g. hwr-*)."""
+    if b.kind != "slurm":
+        return []
+    out = b.raw("squeue -u $USER -h -o '%i %j'", capture=True)
+    import fnmatch
+    return [l.split()[0] for l in out.splitlines() if len(l.split()) == 2 and fnmatch.fnmatch(l.split()[1], pattern)]
+
+
+def clean_all(b, yes=False):
+    """Delete the whole work dir (everything hwr put there, including a Python env inside it)."""
+    real = work_guard(b)
+    if real is None:
+        print(f"nothing to delete: {b.kind}:{b.work} does not exist")
+        return
+    if busy_jobs(b, "hwr-*"):
+        sys.exit("refusing to delete the work dir while hwr jobs are queued or running (hwr status)")
+    w = b.work
+    size = b.raw(f"timeout 300 du -sh {q(w)} 2>/dev/null | cut -f1; true", capture=True).strip() or "?"
+    top = b.raw(f"ls -A {q(w)}", capture=True).split()
+    print(f"will delete {b.kind}:{w} ({real}, {size}) with everything in it:\n  " + " ".join(top))
+    if not yes:
+        if not sys.stdin.isatty():
+            sys.exit("not deleted: confirm with --yes when there is no terminal")
+        try:
+            answer = input(f"type the folder name ({Path(w).name}) to delete it: ").strip()
+        except EOFError:
+            answer = ""
+        if answer != Path(w).name:
+            sys.exit("not deleted")
+    b.raw(f"rm -rf -- {q(w)}")
+    if b.raw(f"test -e {q(w)} && echo left || true", capture=True).strip():
+        sys.exit(f"{w} is still there (permissions?): check it by hand")
+    log(f"deleted {b.kind}:{w}")
+
+
+def clean_run(b, name):
+    """Delete what one run left in the work dir: its export, logs, config and training lists, the uploaded personal
+    data (data/personal and the personal validation lines made from it) and code/. Its checkpoints go too, except
+    the weights export.sh promoted to best.txt (the next `hwr train` starts from them)."""
+    if not NAME_RE.match(name):
+        sys.exit(f"bad run name {name!r}")
+    real = work_guard(b)
+    if real is None:
+        print(f"nothing to delete: {b.kind}:{b.work} does not exist")
+        return
+    if busy_jobs(b, f"hwr-{name}-*"):
+        sys.exit(f"refusing to clean {name} while its jobs are queued or running")
+    paths = [f"export/{name}", f"cfg_{name}.yml", f"data/train/pers_{name}", f"data/train/pers_{name}.list",
+             f"data/train/replay_{name}.list", f"data/train/list_{name}.txt", "data/personal",
+             "data/val/personal_val", "data/val/personal_val_5.txt", "code", f"logs/hwr-{name}.state"]
+    def script(delete):
+        each = 'rm -rf -- "$p"' if delete else 'echo "$p"'
+        promoted = ('find "$ck" -mindepth 1 -maxdepth 1 ! -name latest.pdparams ! -name latest.states -exec rm -rf -- {} +'
+                    if delete else 'echo "$ck (all but latest.pdparams/.states: best.txt points there)"')
+        whole = 'rm -rf -- "$ck"' if delete else 'echo "$ck"'
+        return (f"cd -- {q(b.work)} || exit 1\n"
+                f"best=$(cat best.txt 2>/dev/null || true); ck=ckpt/{name}\n"
+                f"for p in {' '.join(q(p) for p in paths)} logs/hwr-{name}-*; do [ -e \"$p\" ] && {each}; done\n"
+                f"if [ -d \"$ck\" ]; then case \"$best\" in */ckpt/{name}/latest) {promoted};; *) {whole};; esac; fi\n"
+                "true\n")
+    listed = b.raw(script(False), capture=True).strip()
+    if not listed:
+        log(f"nothing of {name} left in {b.kind}:{b.work}")
+        return
+    log(f"deleting from {b.kind}:{b.work}:\n  " + listed.replace("\n", "\n  "))
+    b.raw(script(True))
+    log(f"cleaned {name}")
+
+
+def cmd_clean(a):
+    b = Backend()
+    if a.run:
+        clean_run(b, a.run)
+    else:
+        clean_all(b, a.yes)
+
+
+def job_states(b, jobs):
+    """{job id: (state, reason)} of submitted Slurm jobs; raises on ssh failure."""
+    ids = ",".join(j for _, j in jobs)
+    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "-o", "ServerAliveInterval=30",
+                        b.host, f"sacct -X -n -P -j {ids} -o JobID,State 2>/dev/null; echo ---; "
+                                f"squeue -h -j {ids} -o '%i|%T|%r' 2>/dev/null; true"],
+                       capture_output=True, text=True, encoding="utf-8", timeout=300)
+    if r.returncode != 0 or "---" not in r.stdout:
+        raise OSError(f"ssh exit {r.returncode}: {r.stderr.strip()[-200:]}")
+    acct, queue = r.stdout.split("---", 1)
+    st = {j: ("UNKNOWN", "") for _, j in jobs}
+    for l in acct.splitlines():
+        p = l.strip().split("|")
+        if len(p) >= 2 and p[0] in st:
+            st[p[0]] = (p[1].split()[0] if p[1].split() else "UNKNOWN", "")
+    for l in queue.splitlines():
+        p = l.strip().split("|")
+        if len(p) >= 3 and p[0] in st:
+            st[p[0]] = (p[1], p[2])
+    return st
+
+
+def wait_jobs(b, st, interval):
+    """Poll until every step finished. True = all completed; False = a step failed (the rest is cancelled).
+    ssh failures are retried with a growing pause (up to 30 min), so a network hiccup only delays the run."""
+    if b.kind == "local":
+        while True:
+            s = b.sh(f"cat logs/hwr-{st['name']}.state 2>/dev/null || echo running", capture=True).strip()
+            if s in ("done", "failed"):
+                log(f"{st['name']}: {s}")
+                return s == "done"
+            time.sleep(interval)
+    jobs, last, fails, unseen = st["jobs"], None, 0, 0
+    while True:
+        try:
+            states = job_states(b, jobs)
+            fails = 0
+            unseen = unseen + 1 if any(states[j][0] == "UNKNOWN" for _, j in jobs) else 0
+            if unseen > 30:   # neither sacct nor squeue knows a job for 30 polls in a row
+                log("a job is unknown to sacct and squeue; treating the run as failed")
+                return False
+        except (OSError, subprocess.TimeoutExpired) as e:
+            fails += 1
+            pause = min(interval * fails, 1800)
+            log(f"cannot reach {b.host} ({e}); trying again in {pause} s")
+            time.sleep(pause)
+            continue
+        line = ", ".join(f"{jn.rsplit('-', 1)[-1]} {states[j][0]}" + (f" ({states[j][1]})" if states[j][1] not in ("", "None") else "")
+                         for jn, j in jobs)
+        if line != last:
+            log(line)
+            last = line
+        bad = [j for _, j in jobs if states[j][0] not in LIVE and states[j][0] != "COMPLETED"
+               or states[j][1].startswith("DependencyNeverSatisfied")]
+        if bad:
+            rest = [j for _, j in jobs if states[j][0] in LIVE]
+            if rest:
+                log(f"a step failed; cancelling {' '.join(rest)}")
+                try:
+                    ssh(b.host, f"scancel {' '.join(rest)}")
+                except subprocess.CalledProcessError as e:
+                    log(f"scancel failed ({e}); cancel by hand: scancel {' '.join(rest)}")
+            return False
+        if all(states[j][0] == "COMPLETED" for _, j in jobs):
+            return True
+        time.sleep(interval)
+
+
+def sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def fetch_verified(b, rels, dst):
+    """Copy work-dir files (relative paths) into dst/<basename> and check each against the backend's size and
+    sha256. Returns the list of local files; exits if one does not match (nothing is deleted then)."""
+    if not rels:
+        return []
+    man = b.sh("for f in " + " ".join(q(r) for r in rels) + "; do [ -f \"$f\" ] && "
+               "printf '%s %s %s\\n' \"$(wc -c < \"$f\" | tr -d ' ')\" \"$(sha256sum < \"$f\" | cut -d' ' -f1)\" \"$f\"; done; true",
+               capture=True)
+    want = {l.split(" ", 2)[2]: (int(l.split(" ", 2)[0]), l.split(" ", 2)[1]) for l in man.splitlines() if l.count(" ") >= 2}
+    missing = [r for r in rels if r not in want]
+    if missing:
+        sys.exit(f"not on the backend: {', '.join(missing)}; nothing was deleted")
+    dst.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as t:
+        if b.kind == "slurm":   # one tar stream over ssh; extracted with Python (no scp path quirks on Windows)
+            import tarfile
+            p = subprocess.Popen(["ssh", "-o", "ConnectTimeout=30", b.host,
+                                  f"cd {q(b.work)} && tar -cf - " + " ".join(q(r) for r in rels)], stdout=subprocess.PIPE)
+            with tarfile.open(fileobj=p.stdout, mode="r|") as tf:
+                tf.extractall(t, filter="data")
+            if p.wait() != 0:
+                sys.exit("download failed; nothing was deleted (run the same command again)")
+        else:
+            for r in rels:
+                (Path(t) / r).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(Path(b.work) / r, Path(t) / r)
+        got = []
+        for r in rels:
+            f = Path(t) / r
+            size, digest = want[r]
+            if not f.is_file() or f.stat().st_size != size or sha256(f) != digest:
+                sys.exit(f"{r}: the downloaded copy does not match the backend's (size/sha256); nothing was deleted")
+            out = dst / Path(r).name
+            shutil.copy2(f, out)
+            if out.stat().st_size != size or sha256(out) != digest:
+                sys.exit(f"{out}: copy does not match; nothing was deleted")
+            got.append(out)
+    log(f"fetched and verified {len(got)} file(s) (size + sha256) -> {dst}")
+    return got
+
+
+def save_run(st):
+    RUNS.mkdir(parents=True, exist_ok=True)
+    f = RUNS / f"{st['name']}.json"
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, f)
+
+
+def preflight(b):
+    """A training run needs a set-up work dir (`hwr setup`, `hwr job gen_base.sh`)."""
+    need_paths = ["PaddleOCR/tools/train.py", "data/dict.txt", "data/train/train_list.txt"]
+    out = b.raw(f"cd {q(b.work)} 2>/dev/null || {{ echo NOWORK; exit 0; }}; for p in {' '.join(need_paths)}; do "
+                "[ -e \"$p\" ] || echo \"missing $p\"; done; "
+                "[ -e \"$(cat best.txt 2>/dev/null || echo pretrained/korean).pdparams\" ] || "
+                "[ -e pretrained/korean.pdparams ] || echo 'missing pretrained/korean.pdparams'; true", capture=True)
+    if out.strip():
+        sys.exit(f"the work dir {b.kind}:{b.work} is not ready for training:\n  "
+                 + ("it does not exist" if "NOWORK" in out else out.strip().replace("\n", "\n  "))
+                 + "\nset it up first: hwr setup, hwr job gen_base.sh --res cpu-big (train/README.md)")
+
+
+def cmd_run(a):
+    """upload + sync -> submit -> wait -> fetch + verify -> clean. Safe to run again with the same NAME after an
+    interruption (closed terminal, reboot, network): it continues where it stopped."""
+    name = a.name
+    if not NAME_RE.match(name) or name == "runs":
+        sys.exit(f"bad run name {name!r}: letters, digits, '.', '_', '-'")
+    b = Backend()
+    path = RUNS / f"{name}.json"
+    st = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    if st:
+        if (st["kind"], st["host"], st["work"]) != (b.kind, b.host, b.work):
+            sys.exit(f"{name} was started on {st['kind']}:{st['work']}, not {b.kind}:{b.work}; "
+                     f"use another name or restore that setting ({path})")
+        if st["phase"] == "done":
+            print(f"{name} is finished ({st.get('result')}); results in {st.get('out')}; state {path}")
+            return
+        log(f"resuming {name} (phase {st['phase']})")
+    else:
+        if (OUT / name).exists() and not a.selftest:
+            sys.exit(f"{OUT / name} exists already: pick another name")
+        st = {"name": name, "kind": b.kind, "host": b.host, "work": b.work, "selftest": a.selftest,
+              "env": {k: v for k, v in (("EPOCHS", a.epochs), ("LR", a.lr), ("FROM", a.from_)) if v},
+              "phase": "new", "jobs": [], "started": dt.datetime.now().isoformat(timespec="seconds")}
+        if a.selftest_fail:
+            st["env"]["FAIL"] = "1"
+    if a.clean or "clean" not in st:
+        st["clean"] = a.clean or cfg("HWR_RUN_CLEAN", "run")
+    if st["clean"] not in ("run", "all", "none"):
+        sys.exit(f"HWR_RUN_CLEAN / --clean must be run, all or none, not {st['clean']!r}")
+    st["out"] = str(RUNS / f"{name}-selftest" if st["selftest"] else OUT / name)
+    save_run(st)
+    if st["selftest"]:
+        b.setup = ""        # selftest.sh needs no Python env
+    if st["phase"] in ("new", "submitting"):
+        if st["jobs"] and b.kind == "slurm":   # an interrupted submit: drop the partial chain, then submit again
+            log(f"cancelling the partly submitted jobs {' '.join(j for _, j in st['jobs'])}")
+            ssh(b.host, f"scancel {' '.join(j for _, j in st['jobs'])}; true")
+        st["jobs"] = []
+        if not st["selftest"]:
+            preflight(b)
+            cmd_upload(a)
+        b.sync()
+        st["phase"] = "submitting"
+        save_run(st)
+
+        def on_job(jn, jid):
+            st["jobs"].append([jn, jid])
+            save_run(st)
+        b.submit(name, run_steps(name, st["selftest"]), st["env"], on_job)
+        st["phase"] = "submitted"
+        save_run(st)
+        log(f"submitted {name}; waiting (every {a.interval} s). Interrupt any time: `hwr run {name}` continues")
+    if st["phase"] == "submitted":
+        st["result"] = "ok" if wait_jobs(b, st, a.interval) else "failed"
+        st["phase"] = "finished"
+        save_run(st)
+    out = Path(st["out"])
+    if st["phase"] == "finished":
+        logs = [l for l in b.sh(f"ls logs/hwr-{name}-* 2>/dev/null; true", capture=True).split() if l]
+        files = []
+        if st["result"] == "ok":
+            have = b.sh("for f in " + " ".join(EXPORT_FILES) + f"; do [ -f export/{name}/$f ] && echo $f; done; true",
+                        capture=True).split()
+            if "rec.onnx" not in have or "DONE" not in have:
+                log(f"export/{name} has no rec.onnx or DONE: treating the run as failed")
+                st["result"] = "failed"
+            else:
+                files = [f"export/{name}/{f}" for f in have]
+        fetch_verified(b, files, out)
+        fetch_verified(b, logs, out / "logs")
+        if st["result"] == "ok" and (out / "rec.onnx").stat().st_size == 0:
+            sys.exit(f"{out / 'rec.onnx'} is empty; nothing was deleted")
+        st["phase"] = "fetched"
+        save_run(st)
+    if st["phase"] == "fetched":
+        if st["clean"] == "all":
+            clean_all(b, yes=True)
+        elif st["clean"] == "run":
+            clean_run(b, name)
+        else:
+            log("cleaning skipped (--clean none)")
+        st["phase"] = "cleaned"
+        save_run(st)
+    if st["phase"] == "cleaned":
+        if st["result"] == "ok" and not st["selftest"]:
+            try:
+                cmd_eval(argparse.Namespace(name=name))
+            except SystemExit as e:
+                log(f"eval skipped ({e}); run `hwr eval {name}` where the recognizer is built")
+        st["phase"] = "done"
+        st["finished"] = dt.datetime.now().isoformat(timespec="seconds")
+        save_run(st)
+    log(f"{name}: {st['result']}; results and logs in {out}")
+    if st["result"] != "ok":
+        sys.exit(1)
+
+
 # ---- evaluation ----
 def lev(x, y):
     d = list(range(len(y) + 1))
@@ -454,7 +877,7 @@ def eval_dir(model_dir):
     evals = [r for r in rows if f"/{EVAL_DOC}/" in r[0] and int(Path(r[0]).stem) < EVAL_N]
     if not evals:
         sys.exit("eval lines not found in hwr-data/collected (run `hwr pull`)")
-    env = {**os.environ, "ORT_DYLIB_PATH": str(ORT), "PYTHONIOENCODING": "utf-8"}
+    env = recognizer_env()
     res = subprocess.run([str(EXE), str(model_dir), *[str(COLLECTED / r[0]) for r in rows]],
                          capture_output=True, text=True, encoding="utf-8", env=env, check=True).stdout
     hyp = {}
@@ -478,7 +901,7 @@ def cmd_qc(a):
     width per character."""
     from PIL import Image
     rows = [l.rstrip("\n").split("\t") for l in (COLLECTED / "dataset.tsv").open(encoding="utf-8") if "\t" in l]
-    env = {**os.environ, "ORT_DYLIB_PATH": str(ORT), "PYTHONIOENCODING": "utf-8"}
+    env = recognizer_env()
     res = subprocess.run([str(EXE), str(BASE_MODEL), *[str(COLLECTED / r[0]) for r in rows]],
                          capture_output=True, text=True, encoding="utf-8", env=env, check=True).stdout
     hyp = {}
@@ -683,7 +1106,7 @@ def cmd_install(a):
     """Put rmpp-hwr on the tablet: UI add-on in /usr/lib (loaded by rmpp-preload), recognizer, onnxruntime and
     model in /home. A model already on the tablet (e.g. your personal one) is kept unless --model is given.
     Run again after a reMarkable OS update (it replaces /usr/lib)."""
-    ort_so = Path(cfg("HWR_ORT_AARCH64", str(DEV / "sdk" / "onnxruntime-linux-aarch64-1.31.1" / "lib" / "libonnxruntime.so.1.31.1")))
+    ort_so = Path(cfg("HWR_ORT_AARCH64", str(SDK / "onnxruntime-linux-aarch64-1.31.1" / "lib" / "libonnxruntime.so.1.31.1")))
     ui_so, rec_so = UI_SO, REC_SO
     if a.release or not (UI_SO.exists() and REC_SO.exists() and ort_so.exists()):
         # no local build: prebuilt files from the GitHub release
@@ -876,6 +1299,20 @@ def main():
     p.add_argument("--epochs", help="training epochs (default 2)"); p.add_argument("--lr", help="learning rate (default 5e-5)")
     p.add_argument("--from", dest="from_", choices=["best", "base"], help="start from best.txt (default) or the base model")
     p.set_defaults(f=cmd_train)
+    p = sp.add_parser("run", help="train hands-off: upload -> train -> wait -> fetch + verify -> clean the backend")
+    p.add_argument("name", help="run name (letters, digits, . _ -); run the same command again to resume")
+    p.add_argument("--epochs", help="training epochs (default 2)"); p.add_argument("--lr", help="learning rate (default 5e-5)")
+    p.add_argument("--from", dest="from_", choices=["best", "base"], help="start from best.txt (default) or the base model")
+    p.add_argument("--clean", choices=["run", "all", "none"], help="after the verified fetch delete: this run's files "
+                   "and the uploaded personal data (run, default; HWR_RUN_CLEAN), the whole work dir (all), or nothing")
+    p.add_argument("--interval", type=int, default=120, help="seconds between status checks (default 120)")
+    p.add_argument("--selftest", action="store_true", help="check the pipeline with two tiny CPU jobs (no data, no env)")
+    p.add_argument("--selftest-fail", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(f=cmd_run)
+    p = sp.add_parser("clean", help="delete the work dir on the backend (everything hwr put there), or one run's files")
+    p.add_argument("--run", metavar="NAME", help="only that run's files and the uploaded personal data (as `hwr run`)")
+    p.add_argument("--yes", action="store_true", help="do not ask before deleting the whole work dir")
+    p.set_defaults(f=cmd_clean)
     p = sp.add_parser("status"); p.add_argument("--lines", type=int, default=3); p.set_defaults(f=cmd_status)
     p = sp.add_parser("fetch"); p.add_argument("name"); p.set_defaults(f=cmd_fetch)
     p = sp.add_parser("eval"); p.add_argument("name", nargs="?"); p.set_defaults(f=cmd_eval)

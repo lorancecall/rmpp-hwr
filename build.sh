@@ -18,5 +18,5 @@ done
 export RUSTFLAGS="${RUSTFLAGS}$flags"
 cargo build --release --target aarch64-unknown-linux-gnu --lib
 ui/build.sh
-python tools/texts.py build/texts.tar      # practice texts per language (release asset)
+"${PYTHON:-$(command -v python || command -v python3)}" tools/texts.py build/texts.tar   # practice texts per language (release asset)
 ls -la target/aarch64-unknown-linux-gnu/release/librmpp_hwr.so build/librmpp-hwr-ui.so build/texts.tar
