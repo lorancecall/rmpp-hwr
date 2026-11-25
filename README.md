@@ -19,10 +19,10 @@ Updates for newer OS versions may take some time to follow.
 >
 > Status: beta.
 
-> **Help it read your language: join [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db).** Only the Korean
-> model is fine-tuned on handwriting so far; the other languages need handwriting to train on
-> ([languages and models](#languages-and-models)). The recognizer only gets better with the handwriting people share. rmpp-hwr-db is an open dataset of real pen strokes written on
-> the Paper Pro; it is just starting, so the first writers shape it the most.
+> **Help it read your language: join [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db).** Every language
+> needs handwriting: the Korean model is fine-tuned on a still small set and gets better with each notebook shared,
+> and the other languages have none yet ([languages and models](#languages-and-models)). rmpp-hwr-db is an open
+> dataset of real pen strokes written on the Paper Pro; it is just starting, so the first writers shape it the most.
 > [**Join as a writer**](https://lorancecall.github.io/rmpp-hwr-db/) · [see the dataset](https://github.com/lorancecall/rmpp-hwr-db)
 > · How: write practice pages on the Paper Pro (Settings > Handwriting > Collect training data) and share them with
 > `hwr contribute`, anonymized (CC BY 4.0). Your language is missing? Ask for it there.
@@ -53,20 +53,22 @@ Details: [docs/usage.md](docs/usage.md).
 
 | Language | Package | Model |
 |---|---|---|
-| Korean | `rmpp-hwr-ko` | PP-OCRv5, **fine-tuned on handwriting** ([model card](MODEL_CARD.md)) |
-| English, Chinese, Japanese, Latin-script languages | `rmpp-hwr-en`, `-zh`, `-ja`, `-latin` | PaddleOCR PP-OCRv5 base, **not fine-tuned yet** |
+| Korean | `rmpp-hwr-ko` | PP-OCRv5, **fine-tuned on a small handwriting set**, improving with more ([model card](MODEL_CARD.md)) |
+| English, Chinese, Japanese, Latin-script languages | `rmpp-hwr-en`, `-zh`, `-ja`, `-latin` | PaddleOCR PP-OCRv5 base, **no handwriting data yet** |
 
-The base models are general text recognizers: they read neat handwriting, but miss more of it than a fine-tuned
-model. They get better once there is handwriting in that language to fine-tune on, and that is what
-[rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db) collects. Write a few practice pages in your language and
-share them: [**join as a writer**](https://lorancecall.github.io/rmpp-hwr-db/). Until then, you can also train a
-model on your own handwriting ([docs/develop.md](docs/develop.md)).
+Every language gets better with more handwriting, and that is what
+[rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db) collects. The Korean model is fine-tuned on it, still from
+a few writers, and each new writer makes it read more hands. The other languages use base models, general text
+recognizers that read neat handwriting but miss more of it; they get fine-tuned once there is handwriting in that
+language. Write a few practice pages in your language and share them:
+[**join as a writer**](https://lorancecall.github.io/rmpp-hwr-db/). Meanwhile, you can also train a model on your
+own handwriting ([docs/develop.md](docs/develop.md)).
 
 ## How it works
 
 A Rust recognizer (PaddleOCR PP-OCRv5 models, ONNX) runs on the Paper Pro; a small add-on in xochitl adds the buttons
 and settings, and hands text objects to [rmpp-textobj](https://github.com/lorancecall/rmpp-textobj). The Korean
-model is fine-tuned on rmpp-hwr-db; you can also fine-tune one on your own practice pages. The code, training and references:
+model is fine-tuned on rmpp-hwr-db, still small and growing; you can also fine-tune one on your own practice pages. The code, training and references:
 [docs/develop.md](docs/develop.md).
 
 Privacy: nothing leaves the Paper Pro when you convert; `hwr contribute` sends random writer ids and pen strokes only.

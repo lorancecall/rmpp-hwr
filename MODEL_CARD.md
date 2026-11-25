@@ -9,7 +9,7 @@ rmpp-hwr-db data; older versions are not kept on the Paper Pro.
 | Current version | `rmpp-hwr-korean-v0.3` (training run fix4) |
 | Task | Line recognition of handwriting (CTC), Korean with English and digits, 11,945 characters |
 | Architecture | PaddleOCR PP-OCRv5 mobile recognition (SVTR-LCNet), input 3 x 48 x W, ONNX opset 14 |
-| Error | about 2 % character error rate on the held-out lines of the rmpp-hwr-db data |
+| Error | about 2 % character error rate on the held-out lines of the rmpp-hwr-db data (a few writers so far; see "Limits") |
 | License of the weights | **CC BY-SA 4.0** (see "Licenses" below) |
 
 ## Training data
@@ -39,4 +39,6 @@ converted to ONNX, Apache License 2.0 (see NOTICE).
 ## Limits
 
 Trained mostly on a few writers' handwriting: other hands, very cursive writing and rare characters are less
-accurate. Lines are recognized one at a time; layout (columns, tables) is not understood.
+accurate. rmpp-hwr-db is still small, and the model is retrained as more writers contribute:
+[join as a writer](https://lorancecall.github.io/rmpp-hwr-db/). Lines are recognized one at a time;
+layout (columns, tables) is not understood.

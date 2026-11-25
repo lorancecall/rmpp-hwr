@@ -25,9 +25,10 @@ page itself (Settings > Handwriting > Convert).
   (`rmpp-hwr-ko`, `rmpp-hwr-en`, ...; removed with `vellum del`) and models you trained yourself in
   `/home/root/.local/share/rmpp-hwr/models/<name>/` (`rec.onnx`, `dict.txt`, `model.txt`; listed by the first line of
   `model.txt`).
-  Only the Korean model is fine-tuned on handwriting so far; the English, Chinese, Japanese and Latin-script models
-  are PaddleOCR base models until [rmpp-hwr-db](https://lorancecall.github.io/rmpp-hwr-db/) has handwriting in those
-  languages to train on.
+  The Korean model is fine-tuned on a still small set of handwriting from
+  [rmpp-hwr-db](https://lorancecall.github.io/rmpp-hwr-db/) and improves as more is shared; the English, Chinese,
+  Japanese and Latin-script models are PaddleOCR base models until rmpp-hwr-db has handwriting in those languages.
+  Every language needs writers.
 - **Convert**: Convert page on a new page or into the page; lasso convert to typed text or to a text object.
 - **Collect training data**: new practice notebooks (lines to write, for [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db)
   or your own model) and Save conversions (keeps a copy of the pages you convert, off unless you turn it on).
