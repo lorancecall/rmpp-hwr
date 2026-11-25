@@ -3,8 +3,8 @@
 ## Lasso convert
 
 In the lasso menu: select handwriting with the lasso and tap the convert button (the "aa" icon in a dashed box).
-The recognized text is typed into the page on the line where you wrote it, or, in text object mode, drawn as a
-**text object**.
+The recognized text is typed into the page on the line where you wrote it. rmpp-hwr also works with text objects:
+in text object mode the text is drawn as a **text object** instead.
 
 Text objects are drawn by [rmpp-textobj](https://github.com/lorancecall/rmpp-textobj): ordinary pen strokes in the
 language's font that you can move, resize and copy like handwriting, and edit as text with a double tap (selection
@@ -25,6 +25,9 @@ page itself (Settings > Handwriting > Convert).
   (`rmpp-hwr-ko`, `rmpp-hwr-en`, ...; removed with `vellum del`) and models you trained yourself in
   `/home/root/.local/share/rmpp-hwr/models/<name>/` (`rec.onnx`, `dict.txt`, `model.txt`; listed by the first line of
   `model.txt`).
+  Only the Korean model is fine-tuned on handwriting so far; the English, Chinese, Japanese and Latin-script models
+  are PaddleOCR base models until [rmpp-hwr-db](https://lorancecall.github.io/rmpp-hwr-db/) has handwriting in those
+  languages to train on.
 - **Convert**: Convert page on a new page or into the page; lasso convert to typed text or to a text object.
 - **Collect training data**: new practice notebooks (lines to write, for [rmpp-hwr-db](https://github.com/lorancecall/rmpp-hwr-db)
   or your own model) and Save conversions (keeps a copy of the pages you convert, off unless you turn it on).
